@@ -19,18 +19,14 @@ TOWER_DIMS = (460, 360, 200, 80, 2)
 EPS = 1e-7
 
 
-def _init_uniform(tensor: torch.Tensor, fan_in: int) -> None:
-    bound = 1 / math.sqrt(fan_in)
-    nn.init.uniform_(tensor, -bound, bound)
-
-
 def _make_tower() -> nn.Sequential:
+    # nn.Linear's own default init (kaiming_uniform_ with a=sqrt(5), plus a
+    # matching bias bound) already produces exactly U(-1/sqrt(d_in),
+    # 1/sqrt(d_in)) on both weight and bias -- no extra init call needed to
+    # match the paper's rule.
     layers = []
     for d_in, d_out in zip(TOWER_DIMS, TOWER_DIMS[1:]):
-        linear = nn.Linear(d_in, d_out)
-        _init_uniform(linear.weight, d_in)
-        _init_uniform(linear.bias, d_in)
-        layers.append(linear)
+        layers.append(nn.Linear(d_in, d_out))
         if d_out != TOWER_DIMS[-1]:
             layers.append(nn.ReLU())
     return nn.Sequential(*layers)
@@ -44,7 +40,11 @@ class ESMM(nn.Module):
         for field_id in self.field_ids:
             num_embeddings = field_vocab_sizes[field_id] + 1  # +1 for unseen-token ID 0
             bag = nn.EmbeddingBag(num_embeddings, emb_dim, mode="sum")
-            _init_uniform(bag.weight, num_embeddings)
+            # kaiming_uniform_ with a=sqrt(5) and mode="fan_out" reads the
+            # weight's dim-0 size (num_embeddings) as its fan, giving exactly
+            # U(-1/sqrt(num_embeddings), 1/sqrt(num_embeddings)) -- the paper's
+            # per-field embedding init rule, with no custom formula needed.
+            nn.init.kaiming_uniform_(bag.weight, a=math.sqrt(5), mode="fan_out")
             self.embeddings[field_id] = bag
         self.ctr_tower = _make_tower()
         self.cvr_tower = _make_tower()

@@ -99,3 +99,13 @@ def test_iter_impressions_common_features_limit_bounds_join(tmp_path):
     impressions = list(iter_impressions(tar_path, "train", common_features_limit=1))
 
     assert impressions == []
+
+
+def test_real_data_never_violates_click_before_conversion(real_batch):
+    # Ali-CCP format invariant (paper eq. method-observations: z_i <= y_i):
+    # a conversion can only be logged if a click was also logged. Confirms
+    # the filter in parse_skeleton_line actually holds across real parsed
+    # data, not just the single-line unit tests above.
+    _, y, z, _ = real_batch
+
+    assert bool((z <= y).all())

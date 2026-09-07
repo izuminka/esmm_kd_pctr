@@ -1,21 +1,11 @@
 import math
-import os
 
 import numpy as np
 import pytest
 import torch
 from torch import nn
 
-from data.raw import iter_impressions
-from data.vocab import build_vocabs, encode_batch
 from model.esmm import esmm_loss, ESMM
-
-FIELD_IDS = [
-    "101", "109_14", "110_14", "121", "122", "124", "125", "126", "127", "127_14",
-    "128", "129", "150_14", "205", "206", "207", "210", "216", "301", "508", "509",
-    "702", "853",
-]
-TAR_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "ali-cpp", "sample_train.tar.gz")
 
 
 # --- model architecture and init ---
@@ -84,18 +74,7 @@ def test_loss_finite_at_extreme_predictions():
 
 
 # --- end-to-end integration against real Ali-CCP data ---
-
-
-@pytest.fixture(scope="module")
-def real_batch():
-    impressions = list(iter_impressions(TAR_PATH, "train", limit=2000, common_features_limit=200_000))
-    assert len(impressions) > 100  # sanity: join actually produced usable rows
-    vocabs = build_vocabs(impressions, FIELD_IDS)
-    encoded = encode_batch(impressions, FIELD_IDS, vocabs)
-    y = torch.tensor([imp.y for imp in impressions], dtype=torch.float32)
-    z = torch.tensor([imp.z for imp in impressions], dtype=torch.float32)
-    vocab_sizes = {f: len(v) for f, v in vocabs.items()}
-    return encoded, y, z, vocab_sizes
+# (real_batch fixture lives in conftest.py, shared with test_evaluate.py)
 
 
 def test_forward_backward_on_real_data(real_batch):

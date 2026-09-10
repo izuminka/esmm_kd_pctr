@@ -18,7 +18,6 @@ model_params:
 
 data:
   # paths relative to project root
-  train_tar: ali-cpp/sample_train.tar.gz
-  test_tar: ali-cpp/sample_test.tar.gz
-  cache_dir: cache  # pickle cache for loaded impressions; set to null to disable
+  csv_dir: ali-cpp/extracted   # directory containing common_features_{train,test}.csv etc.
+  cache_dir: cache             # pickle cache; set to null to disable
   # field_ids: omit to use all fields discovered in training data

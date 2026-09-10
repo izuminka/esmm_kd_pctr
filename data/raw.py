@@ -8,12 +8,22 @@ File format (confirmed against the actual `ali-cpp/*.tar.gz` files):
 
 `feature_list` is a "\x01"-separated list of "field_id\x02feat_id\x03value"
 entries. `field_id` is a string, not always numeric (e.g. "109_14").
+
+Preferred path: extract tarballs once with extract_tar(), then call
+iter_impressions_from_csv() which skips gzip overhead and loads
+common_features in parallel across multiple workers.
 """
 
 from __future__ import annotations
 
+import logging
+import multiprocessing as mp
+import os
+import subprocess
 import tarfile
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 FeatureBag = dict[str, list[tuple[int, float]]]
 
@@ -53,30 +63,33 @@ def parse_common_features_line(line: str) -> tuple[str, FeatureBag]:
     return common_feature_index, _parse_feature_list(feature_list)
 
 
+# ---------------------------------------------------------------------------
+# Tar-based loading (original path, kept for compatibility / tests)
+# ---------------------------------------------------------------------------
+
 def iter_impressions(
     tar_path: str,
     split: str,
     limit: int | None = None,
     common_features_limit: int | None = None,
 ):
-    """Yield `Impression`s from `tar_path` with common features merged in.
+    """Yield Impressions from a tar.gz archive (sequential, gzip-decompressed).
 
-    `split` is "train" or "test", selecting `{sample_skeleton,common_features}_{split}.csv`
-    inside the tarball. `limit` bounds the number of yielded impressions.
-    `common_features_limit` bounds how many common-features lines are loaded into
-    the join dict (the full file is tens of GB); an impression whose
-    `common_feature_index` wasn't loaded is skipped. Leave both `None` for a
-    complete, correct pass over a split.
+    Prefer iter_impressions_from_csv() when the tarball has been extracted.
     """
+    logger.info("Opening tarball %s (split=%s)", tar_path, split)
     with tarfile.open(tar_path, "r:gz") as tar:
         common_features: dict[str, FeatureBag] = {}
+        logger.info("Loading common_features_%s.csv from tar...", split)
         with tar.extractfile(f"common_features_{split}.csv") as f:
             for i, raw_line in enumerate(f):
                 if common_features_limit is not None and i >= common_features_limit:
                     break
                 idx, fields = parse_common_features_line(raw_line.decode("utf-8"))
                 common_features[idx] = fields
+        logger.info("Loaded %d common feature entries", len(common_features))
 
+        logger.info("Streaming sample_skeleton_%s.csv from tar...", split)
         with tar.extractfile(f"sample_skeleton_{split}.csv") as f:
             yielded = 0
             for raw_line in f:
@@ -91,3 +104,110 @@ def iter_impressions(
                 impression.fields.update(common)
                 yield impression
                 yielded += 1
+        logger.info("Yielded %d impressions", yielded)
+
+
+# ---------------------------------------------------------------------------
+# CSV-based loading (fast path after extraction)
+# ---------------------------------------------------------------------------
+
+def extract_tar(tar_path: str, out_dir: str) -> None:
+    """Extract tar.gz to out_dir using the system tar command (fast).
+
+    No-op if the expected CSV files already exist in out_dir.
+    """
+    split = "train" if "train" in os.path.basename(tar_path) else "test"
+    sentinel = os.path.join(out_dir, f"common_features_{split}.csv")
+    if os.path.exists(sentinel):
+        logger.info("Already extracted: %s", sentinel)
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    logger.info("Extracting %s -> %s", tar_path, out_dir)
+    subprocess.run(["tar", "-xzf", tar_path, "-C", out_dir], check=True)
+    logger.info("Extraction complete")
+
+
+def _parse_common_features_chunk(path: str, start: int, end: int) -> dict:
+    """Parse lines in byte range [start, end) from a plain common_features CSV.
+
+    Opens in binary mode so that seek()/tell() operate on true byte offsets.
+    Skips the partial first line if start > 0 (we may have split mid-line).
+    Reads past `end` to complete the line that straddles the boundary, so
+    each line is parsed by exactly one worker.
+    """
+    result = {}
+    with open(path, "rb") as f:
+        f.seek(start)
+        if start > 0:
+            f.readline()  # discard the partial line at the start of this chunk
+        while f.tell() < end:
+            raw = f.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8")
+            idx, fields = parse_common_features_line(line)
+            result[idx] = fields
+    return result
+
+
+def _load_common_features_parallel(path: str, n_workers: int) -> dict[str, FeatureBag]:
+    """Load a common_features CSV into a dict using n_workers parallel processes.
+
+    Uses imap_unordered so each chunk dict is merged and discarded as it
+    arrives, keeping peak memory at ~2x the final dict size rather than
+    (n_workers + 1)x.
+    """
+    size = os.path.getsize(path)
+    chunk_size = size // n_workers
+    ranges = [
+        (i * chunk_size, (i + 1) * chunk_size if i < n_workers - 1 else size)
+        for i in range(n_workers)
+    ]
+    logger.info(
+        "Loading %s (%.1f GB) with %d workers, ~%.0f MB each",
+        os.path.basename(path), size / 1e9, n_workers, chunk_size / 1e6,
+    )
+
+    merged: dict[str, FeatureBag] = {}
+    args = [(path, s, e) for s, e in ranges]
+    with mp.Pool(n_workers) as pool:
+        for i, chunk in enumerate(pool.starmap(_parse_common_features_chunk, args)):
+            merged.update(chunk)
+            logger.debug("Merged chunk %d/%d (%d entries so far)", i + 1, n_workers, len(merged))
+
+    logger.info("Loaded %d common feature entries", len(merged))
+    return merged
+
+
+def iter_impressions_from_csv(
+    csv_dir: str,
+    split: str,
+    limit: int | None = None,
+    n_workers: int = 8,
+):
+    """Yield Impressions from pre-extracted plain CSV files.
+
+    common_features is loaded in parallel across n_workers processes.
+    Much faster than iter_impressions() — no gzip decompression, parallel parse.
+    """
+    cf_path = os.path.join(csv_dir, f"common_features_{split}.csv")
+    sk_path = os.path.join(csv_dir, f"sample_skeleton_{split}.csv")
+
+    common_features = _load_common_features_parallel(cf_path, n_workers)
+
+    logger.info("Streaming %s", os.path.basename(sk_path))
+    yielded = 0
+    with open(sk_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if limit is not None and yielded >= limit:
+                return
+            impression = parse_skeleton_line(line)
+            if impression is None:
+                continue
+            common = common_features.get(impression.common_feature_index)
+            if common is None:
+                continue
+            impression.fields.update(common)
+            yield impression
+            yielded += 1
+    logger.info("Yielded %d impressions from %s split", yielded, split)

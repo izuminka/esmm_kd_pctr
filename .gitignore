@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 artifacts/
 ../cache/
+../ali-cpp/extracted/
 ../bash_scripts/
 ../artifacts/
 ../logs/

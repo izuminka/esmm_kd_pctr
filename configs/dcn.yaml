@@ -23,5 +23,6 @@ data:
   # paths relative to project root
   train_tar: ali-cpp/sample_train.tar.gz
   test_tar: ali-cpp/sample_test.tar.gz
-  cache_dir: cache  # pickle cache for loaded impressions; set to null to disable
+  extract_dir: ali-cpp/extracted  # pre-extracted CSV dir; set to null to read from tar
+  cache_dir: cache                # pickle cache on top of CSV loading; set to null to disable
   # field_ids: omit to use all fields discovered in training data

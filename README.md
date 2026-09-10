@@ -1,34 +1,33 @@
-# kd_pctr_to_pcvr
+# kd_pctr_pcvr
 
-Reproduction code for the Ali-CCP experiments in
-[`../paper/frozen_pctr_iclr2027.tex`](../paper/frozen_pctr_iclr2027.tex)
-("Serving-Aligned Entire-Space Conversion Modeling with an External
-Click-through Softlabel Knowledge Distillation"). Currently: the ESMM and
-DCN-V2 models, their losses, evaluation metrics, and the data pipeline that
-feeds them, each built and validated against real data one chunk at a time.
+Reproduction code for the Ali-CCP experiments on Entire-Space Conversion
+Modeling with an External Click-through Softlabel Knowledge Distillation.
+Currently: the ESMM and DCN-V2 models, their losses, evaluation metrics, and
+the data pipeline that feeds them, each built and validated against real data
+one chunk at a time.
 
 ## Layout
 
 ```
 code/
   data/
-    raw.py        # streams + parses the official Ali-CCP tarballs, joins
-                   # skeleton rows to common features, drops z>y rows
-    vocab.py       # per-field vocab (train-only, lexicographic sort, ID 0 =
-                   # unseen) and batch encoding into EmbeddingBag-ready tensors
+    raw.py           # streams + parses the official Ali-CCP tarballs, joins
+                     # skeleton rows to common features, drops z>y rows
+    vocab.py         # per-field vocab (train-only, lexicographic sort, ID 0 =
+                     # unseen) and batch encoding into EmbeddingBag-ready tensors
   model/
-    esmm.py        # ESMM: shared embeddings + CTR/CVR towers, esmm_loss
-    dcn.py         # DCN-V2 pCTR: weighted-mean pooling, cross + deep
-                   # branches, dcn_loss (reuses data/raw.py and
-                   # data/vocab.py unchanged -- only pooling differs from ESMM)
-  metrics.py        # AUC, PR-AUC, normalized entropy, calibration ratio --
+    esmm.py          # ESMM: shared embeddings + CTR/CVR towers, esmm_loss
+    dcn.py           # DCN-V2 pCTR: weighted-mean pooling, cross + deep
+                     # branches, dcn_loss (reuses data/raw.py and
+                     # data/vocab.py unchanged -- only pooling differs from ESMM)
+  metrics.py         # AUC, PR-AUC, normalized entropy, calibration ratio --
                      # framework-agnostic (plain arrays, no torch dependency)
   evaluate.py        # scores an ESMM model's CTR/CTCVR/pCVR heads via metrics.py
-  conftest.py         # makes code/ importable as the test root; shared
-                       # real_batch fixture (~2,000 real Ali-CCP rows)
-  tests/               # one test file per module above, plus real-data
-                        # integration tests using the real_batch fixture
-  requirements.txt      # pinned dependency versions
+  conftest.py        # makes code/ importable as the test root; shared
+                     # real_batch fixture (~2,000 real Ali-CCP rows)
+  tests/             # one test file per module above, plus real-data
+                     # integration tests using the real_batch fixture
+  requirements.txt   # pinned dependency versions
 ```
 
 Data files (`ali-cpp/sample_{train,test}.tar.gz`, the official Ali-CCP

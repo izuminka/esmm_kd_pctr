@@ -1,0 +1,77 @@
+"""Export predictions from a saved checkpoint to Parquet.
+
+Usage:
+    python scripts/predict.py --checkpoint artifacts/dcn_model.pt --split train
+    python scripts/predict.py --checkpoint artifacts/dcn_model.pt --split test \\
+        --out artifacts/predictions_test.parquet
+"""
+
+import argparse
+import os
+import sys
+
+import torch
+
+_CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT_DIR = os.path.dirname(_CODE_DIR)
+if _CODE_DIR not in sys.path:
+    sys.path.insert(0, _CODE_DIR)
+
+from data.raw import iter_impressions
+from training.trainer import Trainer, save_predictions
+
+
+def _load_checkpoint(path: str):
+    ckpt = torch.load(path, weights_only=False)
+    model_type = ckpt["model_type"]
+    if model_type == "dcn":
+        from models.dcn import DCNv2
+        model = DCNv2(ckpt["vocab_sizes"])
+    else:
+        raise ValueError(f"Unknown model_type in checkpoint: {model_type!r}")
+    model.load_state_dict(ckpt["model_state_dict"])
+    return model, ckpt
+
+
+def _select_split(imps: list, split: str, val_frac: float) -> list:
+    n_train = int(len(imps) * (1 - val_frac))
+    if split == "train":
+        return imps[:n_train]
+    if split == "val":
+        return imps[n_train:]
+    return imps  # "test" is the full test set
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Export model predictions to Parquet.")
+    parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint")
+    parser.add_argument("--split", default="train", choices=["train", "val", "test"])
+    parser.add_argument("--out", default=None, help="Output .parquet path (default: next to checkpoint)")
+    parser.add_argument("--data-dir", default=os.path.join(_ROOT_DIR, "ali-cpp"),
+                        help="Directory containing sample_{train,test}.tar.gz")
+    args = parser.parse_args()
+
+    out_path = args.out or os.path.join(
+        os.path.dirname(args.checkpoint), f"predictions_{args.split}.parquet"
+    )
+
+    model, ckpt = _load_checkpoint(args.checkpoint)
+    val_frac = ckpt["val_frac"]
+
+    tar_split = "train" if args.split in ("train", "val") else "test"
+    tar_path = os.path.join(args.data_dir, f"sample_{tar_split}.tar.gz")
+    print(f"Loading {args.split} impressions from {tar_path}...")
+    all_imps = list(iter_impressions(tar_path, tar_split))
+    imps = _select_split(all_imps, args.split, val_frac)
+    print(f"  {len(imps)} impressions (val_frac={val_frac})")
+
+    cfg = {"model": ckpt["model_type"], "training": {"batch_size": 4096, "gpus": -1,
+                                                       "out_dir": ".", "val_frac": val_frac}}
+    trainer = Trainer(cfg, _ROOT_DIR)
+    ids, ys, zs, scores = trainer.predict(model, imps, ckpt["vocabs"], ckpt["field_ids"])
+    save_predictions(ids, ys, zs, scores, out_path)
+    print(f"Saved {len(ids)} predictions -> {out_path}")
+
+
+if __name__ == "__main__":
+    main()

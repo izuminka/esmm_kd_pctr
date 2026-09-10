@@ -1,0 +1,27 @@
+model: dcn
+
+training:
+  epochs: 100         # max epochs; early stopping will terminate sooner
+  batch_size: 4096
+  lr: 0.001
+  val_frac: 0.2
+  seed: 42
+  gpus: -1            # -1 = all available CUDA GPUs; 0 = CPU only
+  out_dir: artifacts  # relative to project root (parent of code/)
+  early_stopping:
+    patience: 3       # epochs with no improvement before stopping
+    min_delta: 0.0001 # minimum improvement to count as progress
+
+model_params:
+  emb_dim: 64
+  cross_rank: 256
+  num_cross_layers: 4
+  deep_hidden_dims: [2048, 1024, 512]
+  dropout: 0.1
+
+data:
+  # paths relative to project root
+  train_tar: ali-cpp/sample_train.tar.gz
+  test_tar: ali-cpp/sample_test.tar.gz
+  cache_dir: cache  # pickle cache for loaded impressions; set to null to disable
+  # field_ids: omit to use all fields discovered in training data

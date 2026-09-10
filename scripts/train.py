@@ -9,9 +9,11 @@ All training logic lives in training/trainer.py.
 
 import argparse
 import hashlib
+import logging
 import os
 import pickle
 import sys
+import time
 
 import yaml
 
@@ -21,9 +23,16 @@ _ROOT_DIR = os.path.dirname(_CODE_DIR)
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
-from data.raw import iter_impressions
+from data.raw import iter_impressions, iter_impressions_from_csv
 from data.vocab import build_vocabs
 from training.trainer import Dataset, Trainer
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("train")
 
 
 def load_config(path: str) -> dict:
@@ -32,37 +41,44 @@ def load_config(path: str) -> dict:
 
 
 def _discover_field_ids(impressions: list) -> list:
-    """Return sorted list of all field IDs seen in impressions."""
     fields = set()
     for imp in impressions:
         fields.update(imp.fields.keys())
     return sorted(fields)
 
 
-def _load_impressions(tar_path: str, split: str, cache_dir: str) -> list:
-    """Load impressions from tar, using a pickle cache keyed by file mtime.
+def _load_impressions(tar_path: str, split: str, extract_dir: str | None, cache_dir: str | None) -> list:
+    """Load impressions with three-tier priority: pickle cache > extracted CSV > tar.gz."""
+    if cache_dir is not None:
+        os.makedirs(cache_dir, exist_ok=True)
+        mtime = str(os.path.getmtime(tar_path))
+        key = hashlib.md5(f"{tar_path}:{split}:{mtime}".encode()).hexdigest()[:10]
+        cache_file = os.path.join(cache_dir, f"{os.path.basename(tar_path).split('.')[0]}_{split}_{key}.pkl")
+        if os.path.exists(cache_file):
+            logger.info("[%s] Loading from pickle cache: %s", split, os.path.basename(cache_file))
+            t0 = time.perf_counter()
+            with open(cache_file, "rb") as f:
+                imps = pickle.load(f)
+            logger.info("[%s] Cache load done in %.1fs — %d impressions", split, time.perf_counter() - t0, len(imps))
+            return imps
 
-    First call: parses the full tar and writes a cache file (~minutes).
-    Subsequent calls: loads the pickle directly (~seconds).
-    Set cache_dir=None to disable caching.
-    """
-    if cache_dir is None:
-        return list(iter_impressions(tar_path, split))
+    t0 = time.perf_counter()
+    if extract_dir is not None:
+        n_workers = os.cpu_count() or 8
+        logger.info("[%s] Reading extracted CSVs with %d workers", split, n_workers)
+        impressions = list(iter_impressions_from_csv(extract_dir, split, n_workers=n_workers))
+    else:
+        logger.info("[%s] Reading from tar (slow path — consider extracting first)", split)
+        impressions = list(iter_impressions(tar_path, split))
+    logger.info("[%s] Loaded %d impressions in %.1fs", split, len(impressions), time.perf_counter() - t0)
 
-    os.makedirs(cache_dir, exist_ok=True)
-    mtime = str(os.path.getmtime(tar_path))
-    key = hashlib.md5(f"{tar_path}:{split}:{mtime}".encode()).hexdigest()[:10]
-    cache_file = os.path.join(cache_dir, f"{os.path.basename(tar_path).split('.')[0]}_{split}_{key}.pkl")
+    if cache_dir is not None:
+        logger.info("[%s] Writing pickle cache: %s", split, os.path.basename(cache_file))
+        t1 = time.perf_counter()
+        with open(cache_file, "wb") as f:
+            pickle.dump(impressions, f)
+        logger.info("[%s] Cache written in %.1fs", split, time.perf_counter() - t1)
 
-    if os.path.exists(cache_file):
-        print(f"  Loading from cache: {os.path.basename(cache_file)}")
-        with open(cache_file, "rb") as f:
-            return pickle.load(f)
-
-    impressions = list(iter_impressions(tar_path, split))
-    with open(cache_file, "wb") as f:
-        pickle.dump(impressions, f)
-    print(f"  Cached to: {os.path.basename(cache_file)}")
     return impressions
 
 
@@ -71,24 +87,25 @@ def build_dataset(cfg: dict, root_dir: str) -> Dataset:
     test_tar = os.path.join(root_dir, cfg["data"]["test_tar"])
     val_frac = cfg["training"]["val_frac"]
 
+    raw_extract = cfg["data"].get("extract_dir")
+    extract_dir = os.path.join(root_dir, raw_extract) if raw_extract else None
     raw_cache = cfg["data"].get("cache_dir")
     cache_dir = os.path.join(root_dir, raw_cache) if raw_cache else None
 
-    print("Loading train impressions...")
-    all_train = _load_impressions(train_tar, "train", cache_dir)
+    logger.info("Loading train impressions (extract_dir=%s, cache_dir=%s)", extract_dir, cache_dir)
+    all_train = _load_impressions(train_tar, "train", extract_dir, cache_dir)
     n_train = int(len(all_train) * (1 - val_frac))
     train_imps, val_imps = all_train[:n_train], all_train[n_train:]
-    print(f"  {len(all_train)} impressions  →  train={len(train_imps)}, val={len(val_imps)}")
+    logger.info("Split: train=%d, val=%d", len(train_imps), len(val_imps))
 
     field_ids = cfg["data"].get("field_ids") or _discover_field_ids(train_imps)
-    print(f"  {len(field_ids)} fields")
+    logger.info("Using %d fields", len(field_ids))
 
-    print("Building vocabs from train split...")
+    logger.info("Building vocabs from train split...")
     vocabs = build_vocabs(train_imps, field_ids)
 
-    print("Loading test impressions...")
-    test_imps = _load_impressions(test_tar, "test", cache_dir)
-    print(f"  {len(test_imps)} test impressions")
+    logger.info("Loading test impressions...")
+    test_imps = _load_impressions(test_tar, "test", extract_dir, cache_dir)
 
     return Dataset(train=train_imps, val=val_imps, test=test_imps, vocabs=vocabs, field_ids=field_ids)
 
@@ -114,17 +131,22 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    print(f"Config: model={cfg['model']}  epochs={cfg['training']['epochs']}"
-          f"  batch_size={cfg['training']['batch_size']}  lr={cfg['training']['lr']}")
+    logger.info(
+        "Config: model=%s  epochs=%d  batch_size=%d  lr=%s  devices=auto",
+        cfg["model"], cfg["training"]["epochs"], cfg["training"]["batch_size"], cfg["training"]["lr"],
+    )
 
+    t0 = time.perf_counter()
     dataset = build_dataset(cfg, _ROOT_DIR)
+    logger.info("Dataset ready in %.1fs", time.perf_counter() - t0)
+
     model = build_model(cfg, dataset.vocab_sizes)
     metric_fn = build_metric_fn(cfg)
     trainer = Trainer(cfg, _ROOT_DIR)
-    print(f"Devices: {trainer.devices}")
+    logger.info("Devices: %s", trainer.devices)
 
     checkpoint = trainer.fit(model, dataset, metric_fn)
-    print(f"\nDone. Checkpoint: {checkpoint}")
+    logger.info("Done. Checkpoint: %s", checkpoint)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,9 @@ def _load_checkpoint(path: str):
     if model_type == "dcn":
         from models.dcn import DCNv2
         model = DCNv2(ckpt["vocab_sizes"])
+    elif model_type == "esmm":
+        from models.esmm import ESMM
+        model = ESMM(ckpt["vocab_sizes"], **ckpt.get("model_params", {}))
     else:
         raise ValueError(f"Unknown model_type in checkpoint: {model_type!r}")
     model.load_state_dict(ckpt["model_state_dict"])
@@ -63,10 +66,14 @@ def main():
 
     encoded = encode_batch(imps, ckpt["field_ids"], ckpt["vocabs"])
     y = torch.tensor([imp.y for imp in imps], dtype=torch.float32)
+    z = torch.tensor([imp.z for imp in imps], dtype=torch.float32)
 
     if ckpt["model_type"] == "dcn":
         from evaluation.dcn import evaluate_dcn
         results = evaluate_dcn(model, encoded, y)
+    elif ckpt["model_type"] == "esmm":
+        from evaluation.esmm import evaluate_esmm
+        results = evaluate_esmm(model, encoded, y, z)
     else:
         raise ValueError(f"Unknown model_type: {ckpt['model_type']!r}")
 

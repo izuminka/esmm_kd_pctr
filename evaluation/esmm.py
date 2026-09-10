@@ -13,7 +13,7 @@ invariant having been enforced upstream.
 
 import torch
 
-from metrics import compute_metrics
+from evaluation.metrics import compute_metrics
 
 
 def evaluate_esmm(model, batch, y: torch.Tensor, z: torch.Tensor) -> dict:

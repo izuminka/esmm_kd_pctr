@@ -1,12 +1,15 @@
 """ESMM: shared embeddings feed independent CTR and CVR towers.
 
 Architecture and init match the paper's Ali-CCP recipe:
-  - one EmbeddingBag per categorical field, width 20, raw weighted-sum pooling
-  - two towers, each 460 -> 360 -> 200 -> 80 -> 2, ReLU after each hidden layer
+  - one EmbeddingBag per categorical field, width emb_dim, raw weighted-sum pooling
+  - two towers with configurable layer dims, ReLU after each hidden layer
   - q = softmax(CTR logits)[:, 1], v = softmax(CVR logits)[:, 1]
   - embeddings ~ U(-1/sqrt(K_f), 1/sqrt(K_f)); dense weight/bias ~ U(-1/sqrt(d_in), 1/sqrt(d_in))
 
 Loss: CTR term is two-logit cross-entropy vs y; CTCVR term is BCE(y*z, q*v).
+
+Paper defaults: emb_dim=20, tower_dims=(460, 360, 200, 80, 2).
+tower_dims[0] must equal num_fields * emb_dim.
 """
 
 import math
@@ -15,26 +18,34 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-TOWER_DIMS = (460, 360, 200, 80, 2)
 EPS = 1e-7
 
+_PAPER_TOWER_DIMS = (460, 360, 200, 80, 2)
 
-def _make_tower() -> nn.Sequential:
+
+def _make_tower(tower_dims: tuple) -> nn.Sequential:
     # nn.Linear's own default init (kaiming_uniform_ with a=sqrt(5), plus a
     # matching bias bound) already produces exactly U(-1/sqrt(d_in),
     # 1/sqrt(d_in)) on both weight and bias -- no extra init call needed to
     # match the paper's rule.
     layers = []
-    for d_in, d_out in zip(TOWER_DIMS, TOWER_DIMS[1:]):
+    for d_in, d_out in zip(tower_dims, tower_dims[1:]):
         layers.append(nn.Linear(d_in, d_out))
-        if d_out != TOWER_DIMS[-1]:
+        if d_out != tower_dims[-1]:
             layers.append(nn.ReLU())
     return nn.Sequential(*layers)
 
 
 class ESMM(nn.Module):
-    def __init__(self, field_vocab_sizes: dict[str, int], emb_dim: int = 20):
+    def __init__(
+        self,
+        field_vocab_sizes: dict[str, int],
+        emb_dim: int = 20,
+        tower_dims: tuple = _PAPER_TOWER_DIMS,
+    ):
         super().__init__()
+        self.emb_dim = emb_dim
+        self.tower_dims = tuple(tower_dims)
         self.field_ids = sorted(field_vocab_sizes)
         self.embeddings = nn.ModuleDict()
         for field_id in self.field_ids:
@@ -46,8 +57,8 @@ class ESMM(nn.Module):
             # per-field embedding init rule, with no custom formula needed.
             nn.init.kaiming_uniform_(bag.weight, a=math.sqrt(5), mode="fan_out")
             self.embeddings[field_id] = bag
-        self.ctr_tower = _make_tower()
-        self.cvr_tower = _make_tower()
+        self.ctr_tower = _make_tower(self.tower_dims)
+        self.cvr_tower = _make_tower(self.tower_dims)
 
     def forward(
         self, batch: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]

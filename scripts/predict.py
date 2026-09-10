@@ -18,7 +18,7 @@ if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
 from data.raw import iter_impressions
-from training.trainer import Trainer, save_predictions
+from training.trainer import Trainer, save_predictions, save_esmm_predictions
 
 
 def _load_checkpoint(path: str):
@@ -27,6 +27,9 @@ def _load_checkpoint(path: str):
     if model_type == "dcn":
         from models.dcn import DCNv2
         model = DCNv2(ckpt["vocab_sizes"])
+    elif model_type == "esmm":
+        from models.esmm import ESMM
+        model = ESMM(ckpt["vocab_sizes"], **ckpt.get("model_params", {}))
     else:
         raise ValueError(f"Unknown model_type in checkpoint: {model_type!r}")
     model.load_state_dict(ckpt["model_state_dict"])
@@ -68,8 +71,12 @@ def main():
     cfg = {"model": ckpt["model_type"], "training": {"batch_size": 4096, "gpus": -1,
                                                        "out_dir": ".", "val_frac": val_frac}}
     trainer = Trainer(cfg, _ROOT_DIR)
-    ids, ys, zs, scores = trainer.predict(model, imps, ckpt["vocabs"], ckpt["field_ids"])
-    save_predictions(ids, ys, zs, scores, out_path)
+    if ckpt["model_type"] == "esmm":
+        ids, ys, zs, qs, vs = trainer.predict_esmm(model, imps, ckpt["vocabs"], ckpt["field_ids"])
+        save_esmm_predictions(ids, ys, zs, qs, vs, out_path)
+    else:
+        ids, ys, zs, scores = trainer.predict(model, imps, ckpt["vocabs"], ckpt["field_ids"])
+        save_predictions(ids, ys, zs, scores, out_path)
     print(f"Saved {len(ids)} predictions -> {out_path}")
 
 

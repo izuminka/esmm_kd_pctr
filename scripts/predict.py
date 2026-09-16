@@ -68,7 +68,8 @@ def main():
     imps = _select_split(all_imps, args.split, val_frac)
     print(f"  {len(imps)} impressions (val_frac={val_frac})")
 
-    cfg = {"model": ckpt["model_type"], "training": {"batch_size": 4096, "gpus": -1,
+    cfg = {"model": ckpt["model_type"], "training": {"batch_size": 4096,
+                                                     "eval_batch_size": 4096, "gpus": -1,
                                                        "out_dir": ".", "val_frac": val_frac}}
     trainer = Trainer(cfg, _ROOT_DIR)
     if ckpt["model_type"] == "esmm":

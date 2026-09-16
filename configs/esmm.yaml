@@ -2,11 +2,15 @@ model: esmm
 
 training:
   epochs: 100         # max epochs; early stopping will terminate sooner
-  batch_size: 4096
+  batch_size: 32768   # large batches: labels are ~4.6% clicks / ~0.03% conversions,
+                      # so small batches often contain no positive at all
+  eval_batch_size: 65536  # eval runs under no_grad, so it fits a bigger batch
   lr: 0.001
   val_frac: 0.2
   seed: 42
-  gpus: -1            # -1 = all available CUDA GPUs; 0 = CPU only
+  gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
+  load_test: true     # false leaves the test split on disk to save VRAM,
+                      # which also skips its prediction export
   out_dir: artifacts  # relative to project root (parent of code/)
   early_stopping:
     patience: 3       # epochs with no improvement before stopping
@@ -19,5 +23,5 @@ model_params:
 data:
   # paths relative to project root
   csv_dir: ali-cpp/extracted   # directory containing common_features_{train,test}.csv etc.
-  cache_dir: cache             # pickle cache; set to null to disable
+  encoded_dir: encoded         # preprocessed numpy arrays (run scripts/preprocess.py once)
   # field_ids: omit to use all fields discovered in training data

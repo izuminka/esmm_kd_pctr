@@ -1,10 +1,6 @@
 """Generic Trainer for Ali-CCP recommendation models (DCN, ESMM, ...).
 
-Multi-GPU support: when multiple CUDA devices are available, each mini-batch is
-split into equal per-device chunks.  Forwards run concurrently (CUDA kernels
-are queued asynchronously while the CPU encodes the next chunk), and per-replica
-gradients are reduced back to the master model before each optimizer step.
-Falls back to single GPU or CPU automatically.
+Trains on a single device (GPU if available, else CPU).
 
 Usage (via scripts/train.py — don't instantiate directly in tests):
     trainer = Trainer(cfg, root_dir)
@@ -15,15 +11,33 @@ import logging
 import os
 import random
 import time
+import warnings
 from dataclasses import dataclass
 
 import pandas as pd
 import torch
-import torch.nn.parallel as parallel
 
 from data.vocab import encode_batch
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_device(gpus: int) -> torch.device:
+    """Pick the single device to train on.
+
+    gpus == 0 forces CPU. Any other value uses cuda:0 if available,
+    falling back to CPU with a warning otherwise.
+    """
+    if gpus == 0:
+        return torch.device("cpu")
+    if not torch.cuda.is_available():
+        warnings.warn(
+            "CUDA requested but not available. Falling back to CPU.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return torch.device("cpu")
+    return torch.device("cuda:0")
 
 
 @dataclass
@@ -40,19 +54,24 @@ class Dataset:
 
 
 def _to_device(encoded: dict, device: torch.device) -> dict:
-    return {k: tuple(t.to(device) for t in v) for k, v in encoded.items()}
+    return {k: tuple(t.to(device, non_blocking=True) for t in v) for k, v in encoded.items()}
+
+
+# y/z are 0/1 labels; pin them so the schema does not depend on whether the
+# caller came from the tensor path (floats) or the Impression path (ints).
+_LABEL_DTYPES = {"y": "int8", "z": "int8"}
 
 
 def save_predictions(ids, ys, zs, scores, path: str) -> None:
     pd.DataFrame(
         {"sample_id": ids, "y": ys, "z": zs, "score": scores}
-    ).astype({"score": "float32"}).to_parquet(path, index=False)
+    ).astype({**_LABEL_DTYPES, "score": "float32"}).to_parquet(path, index=False)
 
 
 def save_esmm_predictions(ids, ys, zs, q_scores, v_scores, path: str) -> None:
     pd.DataFrame(
         {"sample_id": ids, "y": ys, "z": zs, "q": q_scores, "v": v_scores}
-    ).astype({"q": "float32", "v": "float32"}).to_parquet(path, index=False)
+    ).astype({**_LABEL_DTYPES, "q": "float32", "v": "float32"}).to_parquet(path, index=False)
 
 
 class Trainer:
@@ -61,55 +80,65 @@ class Trainer:
         self.model_name = cfg["model"]
         self.epochs = tr["epochs"]
         self.batch_size = tr["batch_size"]
+        self.eval_batch_size = tr["eval_batch_size"]
         self.lr = tr["lr"]
         self.seed = tr.get("seed", 42)
         self.val_frac = tr["val_frac"]
         self.out_dir = os.path.join(root_dir, tr["out_dir"])
-        self.devices = self._setup_devices(tr.get("gpus", -1))
+        self.device = resolve_device(tr.get("gpus", -1))
         es = tr.get("early_stopping", {})
         self.es_patience = es.get("patience", 5)
         self.es_min_delta = es.get("min_delta", 1e-4)
-
-    def _setup_devices(self, gpus: int) -> list:
-        if gpus == 0:
-            return [torch.device("cpu")]
-        if not torch.cuda.is_available():
-            if gpus != 0:
-                import warnings
-                warnings.warn(
-                    "CUDA requested but not available. Falling back to CPU.",
-                    RuntimeWarning,
-                    stacklevel=3,
-                )
-            return [torch.device("cpu")]
-        n_available = torch.cuda.device_count()
-        n = n_available if gpus == -1 else min(gpus, n_available)
-        return [torch.device(f"cuda:{i}") for i in range(max(1, n))]
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def fit(self, model, dataset: Dataset, metric_fn) -> str:
+    def fit(self, model, dataset, metric_fn) -> str:
         """Train model, checkpoint best by metric_fn, export predictions.
+
+        Accepts either a NumpyDataset (preferred, no Python Impression objects)
+        or the legacy Dataset (list-of-Impression).
 
         metric_fn(model, encoded_val, val_y) -> float  (higher = better).
         Returns the path of the saved checkpoint.
         """
+        from training.dataset import NumpyDataset
+        use_numpy = isinstance(dataset, NumpyDataset)
+
         random.seed(self.seed)
         os.makedirs(self.out_dir, exist_ok=True)
 
-        device = self.devices[0]
+        device = self.device
         model = model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
         checkpoint_path = os.path.join(self.out_dir, f"{self.model_name}_model.pt")
 
-        val_encoded = _to_device(encode_batch(dataset.val, dataset.field_ids, dataset.vocabs), device)
-        val_y = torch.tensor([imp.y for imp in dataset.val], dtype=torch.float32, device=device)
+        if not use_numpy:
+            val_encoded = _to_device(
+                encode_batch(dataset.val, dataset.field_ids, dataset.vocabs), device
+            )
+            val_y = torch.tensor(
+                [imp.y for imp in dataset.val], dtype=torch.float32, device=device
+            )
+
+        vocabs = dataset.vocab if use_numpy else dataset.vocabs
+        field_ids = dataset.field_ids
+
+        # The encoded split is authoritative: evaluate.py/predict.py re-slice raw
+        # impressions by the checkpoint's val_frac, so recording the config's
+        # value instead would send them to rows the model trained on.
+        val_frac = dataset.val_frac if use_numpy else self.val_frac
+        if use_numpy and val_frac != self.val_frac:
+            logger.warning(
+                "config val_frac=%s but the encoded data was split at %s; using %s. "
+                "Re-run preprocess.py to change the split.",
+                self.val_frac, val_frac, val_frac,
+            )
 
         logger.info(
-            "Training %s | %d epochs | batch=%d | lr=%s | devices=%s | early_stopping(patience=%d, min_delta=%s)",
-            self.model_name, self.epochs, self.batch_size, self.lr, self.devices,
+            "Training %s | %d epochs | batch=%d | lr=%s | device=%s | early_stopping(patience=%d, min_delta=%s)",
+            self.model_name, self.epochs, self.batch_size, self.lr, self.device,
             self.es_patience, self.es_min_delta,
         )
 
@@ -117,9 +146,17 @@ class Trainer:
         no_improve = 0
         for epoch in range(1, self.epochs + 1):
             t0 = time.perf_counter()
-            loss = self.train_epoch(model, dataset.train, dataset.vocabs, dataset.field_ids, optimizer)
+            if use_numpy:
+                loss = self._train_epoch_numpy(model, dataset.train, optimizer)
+            else:
+                loss = self.train_epoch(model, dataset.train, dataset.vocabs, field_ids, optimizer)
             epoch_secs = time.perf_counter() - t0
-            score = metric_fn(model, val_encoded, val_y)
+
+            if use_numpy:
+                score = self._val_score_numpy(model, dataset.val)
+            else:
+                score = metric_fn(model, val_encoded, val_y)
+
             logger.info(
                 "Epoch %d/%d  loss=%.4f  val_score=%.4f  time=%.1fs",
                 epoch, self.epochs, loss, score, epoch_secs,
@@ -130,10 +167,10 @@ class Trainer:
                 ckpt_data = {
                     "model_type": self.model_name,
                     "model_state_dict": model.state_dict(),
-                    "vocabs": dataset.vocabs,
-                    "field_ids": dataset.field_ids,
+                    "vocabs": vocabs,
+                    "field_ids": field_ids,
                     "vocab_sizes": dataset.vocab_sizes,
-                    "val_frac": self.val_frac,
+                    "val_frac": val_frac,
                 }
                 if self.model_name == "esmm":
                     ckpt_data["model_params"] = {
@@ -154,16 +191,28 @@ class Trainer:
         model.load_state_dict(ckpt["model_state_dict"])
 
         logger.info("Exporting predictions...")
-        for split_name, imps in [("train", dataset.train), ("val", dataset.val), ("test", dataset.test)]:
-            t0 = time.perf_counter()
-            path = os.path.join(self.out_dir, f"predictions_{split_name}.parquet")
-            if self.model_name == "esmm":
-                ids, ys, zs, qs, vs = self.predict_esmm(model, imps, dataset.vocabs, dataset.field_ids)
-                save_esmm_predictions(ids, ys, zs, qs, vs, path)
-            else:
-                ids, ys, zs, scores = self.predict(model, imps, dataset.vocabs, dataset.field_ids)
+        if use_numpy:
+            splits = [("train", dataset.train), ("val", dataset.val), ("test", dataset.test)]
+            for split_name, split_data in splits:
+                if split_data is None:  # split not loaded (see NumpyDataset.load(load_test=))
+                    logger.info("  %s: not loaded, skipping export", split_name)
+                    continue
+                t0 = time.perf_counter()
+                path = os.path.join(self.out_dir, f"predictions_{split_name}.parquet")
+                ids, ys, zs, scores = self._predict_numpy(model, split_data)
                 save_predictions(ids, ys, zs, scores, path)
-            logger.info("  %s: %d rows -> %s (%.1fs)", split_name, len(ids), path, time.perf_counter() - t0)
+                logger.info("  %s: %d rows -> %s (%.1fs)", split_name, len(ids), path, time.perf_counter() - t0)
+        else:
+            for split_name, imps in [("train", dataset.train), ("val", dataset.val), ("test", dataset.test)]:
+                t0 = time.perf_counter()
+                path = os.path.join(self.out_dir, f"predictions_{split_name}.parquet")
+                if self.model_name == "esmm":
+                    ids, ys, zs, qs, vs = self.predict_esmm(model, imps, dataset.vocabs, field_ids)
+                    save_esmm_predictions(ids, ys, zs, qs, vs, path)
+                else:
+                    ids, ys, zs, scores = self.predict(model, imps, dataset.vocabs, field_ids)
+                    save_predictions(ids, ys, zs, scores, path)
+                logger.info("  %s: %d rows -> %s (%.1fs)", split_name, len(ids), path, time.perf_counter() - t0)
 
         return checkpoint_path
 
@@ -187,7 +236,7 @@ class Trainer:
     def predict(self, model, impressions: list, vocabs: dict, field_ids: list) -> tuple:
         """Return (sample_ids, ys, zs, scores) as plain Python lists."""
         model.eval()
-        device = self.devices[0]
+        device = self.device
         ids, ys, zs, scores = [], [], [], []
         with torch.no_grad():
             for start in range(0, len(impressions), self.batch_size):
@@ -203,7 +252,7 @@ class Trainer:
     def predict_esmm(self, model, impressions: list, vocabs: dict, field_ids: list) -> tuple:
         """Return (sample_ids, ys, zs, q_scores, v_scores) as plain Python lists."""
         model.eval()
-        device = self.devices[0]
+        device = self.device
         ids, ys, zs, q_scores, v_scores = [], [], [], [], []
         with torch.no_grad():
             for start in range(0, len(impressions), self.batch_size):
@@ -218,11 +267,89 @@ class Trainer:
         return ids, ys, zs, q_scores, v_scores
 
     # ------------------------------------------------------------------
-    # Internal: forward + backward (+ grad reduction for multi-GPU)
+    # NumpyDataset-backed epoch/predict/val helpers
+    # ------------------------------------------------------------------
+
+    def _train_epoch_numpy(self, model, split_data, optimizer) -> float:
+        """One shuffled epoch over a SplitData; returns mean batch loss."""
+        model.train()
+        n = len(split_data)
+        indices = list(range(n))
+        random.shuffle(indices)
+        total_loss, n_batches = 0.0, 0
+
+        for start in range(0, n, self.batch_size):
+            batch_idx = indices[start : start + self.batch_size]
+            optimizer.zero_grad()
+            loss_val = self._train_step_numpy(model, split_data, batch_idx)
+            optimizer.step()
+            total_loss += loss_val
+            n_batches += 1
+
+            if n_batches % 500 == 0:
+                logger.debug("  batch %d/%d  loss=%.4f", n_batches, n // self.batch_size, loss_val)
+
+        return total_loss / n_batches if n_batches else 0.0
+
+    def _train_step_numpy(self, model, split_data, batch_idx: list) -> float:
+        """Forward + backward for a NumpyDataset batch.
+
+        No host->device transfer: the split already lives on self.device.
+        """
+        from models.dcn import dcn_loss
+
+        enc, y, _ = split_data.get_batch(batch_idx)
+        loss = dcn_loss(y, model(enc))
+        loss.backward()
+        return loss.item()
+
+    def _predict_numpy(self, model, split_data) -> tuple:
+        """Return (sample_ids, ys, zs, scores) as numpy arrays from a SplitData."""
+        model.eval()
+        ids_out, ys_out, zs_out, scores_out = [], [], [], []
+        n = len(split_data)
+        with torch.no_grad():
+            for start in range(0, n, self.batch_size):
+                idx = torch.arange(start, min(start + self.batch_size, n),
+                                   device=split_data.device)
+                enc, y, z = split_data.get_batch(idx)
+                logit = model(enc)
+                ids_out.append(split_data.sample_ids[idx].cpu())
+                ys_out.append(y.cpu())
+                zs_out.append(z.cpu())
+                scores_out.append(torch.sigmoid(logit).cpu())
+        return (
+            torch.cat(ids_out).numpy(),
+            torch.cat(ys_out).numpy(),
+            torch.cat(zs_out).numpy(),
+            torch.cat(scores_out).numpy(),
+        )
+
+    def _val_score_numpy(self, model, val_split) -> float:
+        """Compute validation AUC in batches (bounds activation memory)."""
+        from evaluation.metrics import compute_metrics
+        model.eval()
+        all_scores, all_y = [], []
+        eval_batch = self.eval_batch_size
+        n = len(val_split)
+        with torch.no_grad():
+            for start in range(0, n, eval_batch):
+                idx = torch.arange(start, min(start + eval_batch, n),
+                                   device=val_split.device)
+                enc, y, _ = val_split.get_batch(idx)
+                logit = model(enc)
+                all_scores.append(torch.sigmoid(logit).cpu())
+                all_y.append(y.cpu())
+        scores = torch.cat(all_scores).numpy()
+        ys = torch.cat(all_y).numpy()
+        return compute_metrics(scores, ys)["auc"]
+
+    # ------------------------------------------------------------------
+    # Internal: forward + backward
     # ------------------------------------------------------------------
 
     def _train_step(self, model, batch: list, vocabs: dict, field_ids: list) -> float:
-        """Forward + backward (and grad reduction for multi-GPU).
+        """Forward + backward.
 
         Gradient zeroing and optimizer.step() are the caller's responsibility.
         Returns the scalar loss value for logging.
@@ -232,84 +359,21 @@ class Trainer:
 
         from models.dcn import dcn_loss  # late import keeps trainer model-agnostic
 
-        if len(self.devices) == 1:
-            device = self.devices[0]
-            enc = _to_device(encode_batch(batch, field_ids, vocabs), device)
-            y = torch.tensor([imp.y for imp in batch], dtype=torch.float32, device=device)
-            loss = dcn_loss(y, model(enc))
-            loss.backward()
-            return loss.item()
-
-        # Multi-GPU path: split batch into per-device chunks.
-        # CUDA forwards queue asynchronously, so the CPU can encode the next
-        # chunk while the GPU is still processing the previous one.
-        n_gpus = len(self.devices)
-        chunk_size = max(1, (len(batch) + n_gpus - 1) // n_gpus)
-        chunks = [batch[i : i + chunk_size] for i in range(0, len(batch), chunk_size)]
-        active_devices = self.devices[: len(chunks)]
-        replicas = parallel.replicate(model, active_devices)
-
-        logits, ys = [], []
-        for chunk, replica, device in zip(chunks, replicas, active_devices):
-            enc = _to_device(encode_batch(chunk, field_ids, vocabs), device)
-            logits.append(replica(enc))
-            ys.append(torch.tensor([imp.y for imp in chunk], dtype=torch.float32, device=device))
-
-        # Gather to primary device and compute a single scalar loss.
-        logit_all = torch.cat([l.to(self.devices[0]) for l in logits])
-        y_all = torch.cat([y.to(self.devices[0]) for y in ys])
-        loss = dcn_loss(y_all, logit_all)
-
-        # Backward propagates through gather back to each replica's params.
+        device = self.device
+        enc = _to_device(encode_batch(batch, field_ids, vocabs), device)
+        y = torch.tensor([imp.y for imp in batch], dtype=torch.float32, device=device)
+        loss = dcn_loss(y, model(enc))
         loss.backward()
-
-        # Reduce per-replica gradients to the master model parameters so
-        # optimizer.step() (which acts on master params) sees the full gradient.
-        for master_p, *replica_ps in zip(model.parameters(), *[r.parameters() for r in replicas]):
-            grads = [p.grad.to(self.devices[0]) for p in replica_ps if p.grad is not None]
-            master_p.grad = (sum(grads) / len(grads)) if grads else None
-
         return loss.item()
 
     def _train_step_esmm(self, model, batch: list, vocabs: dict, field_ids: list) -> float:
         from models.esmm import esmm_loss
 
-        if len(self.devices) == 1:
-            device = self.devices[0]
-            enc = _to_device(encode_batch(batch, field_ids, vocabs), device)
-            y = torch.tensor([imp.y for imp in batch], dtype=torch.float32, device=device)
-            z = torch.tensor([imp.z for imp in batch], dtype=torch.float32, device=device)
-            q, v = model(enc)
-            loss = esmm_loss(y, z, q, v)
-            loss.backward()
-            return loss.item()
-
-        n_gpus = len(self.devices)
-        chunk_size = max(1, (len(batch) + n_gpus - 1) // n_gpus)
-        chunks = [batch[i : i + chunk_size] for i in range(0, len(batch), chunk_size)]
-        active_devices = self.devices[: len(chunks)]
-        replicas = parallel.replicate(model, active_devices)
-
-        qs, vs, ys, zs = [], [], [], []
-        for chunk, replica, device in zip(chunks, replicas, active_devices):
-            enc = _to_device(encode_batch(chunk, field_ids, vocabs), device)
-            q, v = replica(enc)
-            qs.append(q)
-            vs.append(v)
-            ys.append(torch.tensor([imp.y for imp in chunk], dtype=torch.float32, device=device))
-            zs.append(torch.tensor([imp.z for imp in chunk], dtype=torch.float32, device=device))
-
-        primary = self.devices[0]
-        q_all = torch.cat([t.to(primary) for t in qs])
-        v_all = torch.cat([t.to(primary) for t in vs])
-        y_all = torch.cat([t.to(primary) for t in ys])
-        z_all = torch.cat([t.to(primary) for t in zs])
-        loss = esmm_loss(y_all, z_all, q_all, v_all)
-
+        device = self.device
+        enc = _to_device(encode_batch(batch, field_ids, vocabs), device)
+        y = torch.tensor([imp.y for imp in batch], dtype=torch.float32, device=device)
+        z = torch.tensor([imp.z for imp in batch], dtype=torch.float32, device=device)
+        q, v = model(enc)
+        loss = esmm_loss(y, z, q, v)
         loss.backward()
-
-        for master_p, *replica_ps in zip(model.parameters(), *[r.parameters() for r in replicas]):
-            grads = [p.grad.to(primary) for p in replica_ps if p.grad is not None]
-            master_p.grad = (sum(grads) / len(grads)) if grads else None
-
         return loss.item()

@@ -46,6 +46,9 @@ def build_model(cfg: dict, vocab_sizes: dict):
     if cfg["model"] == "dcn":
         from models.dcn import DCNv2
         return DCNv2(vocab_sizes, **params)
+    if cfg["model"] == "esmm":
+        from models.esmm import ESMM
+        return ESMM(vocab_sizes, **params)
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 
 
@@ -53,6 +56,9 @@ def build_metric_fn(cfg: dict):
     if cfg["model"] == "dcn":
         from evaluation.dcn import evaluate_dcn
         return lambda model, enc, y: evaluate_dcn(model, enc, y)["ctr"]["auc"]
+    if cfg["model"] == "esmm":
+        from evaluation.esmm import evaluate_esmm
+        return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z)["ctcvr"]["pr_auc"]
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 
 

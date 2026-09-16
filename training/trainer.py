@@ -65,16 +65,24 @@ def _to_device(encoded: dict, device: torch.device) -> dict:
 _LABEL_DTYPES = {"y": "int8", "z": "int8"}
 
 
+def save_scores(ids, ys, zs, scores: dict, path: str) -> None:
+    """Write one split's predictions; `scores` maps column name -> values.
+
+    A model contributes as many score columns as it has reported heads, so the
+    column set is the model's, not this writer's: downstream evaluation reads
+    them back by name.
+    """
+    pd.DataFrame({"sample_id": ids, "y": ys, "z": zs, **scores}).astype(
+        {**_LABEL_DTYPES, **{c: "float32" for c in scores}}
+    ).to_parquet(path, index=False)
+
+
 def save_predictions(ids, ys, zs, scores, path: str) -> None:
-    pd.DataFrame(
-        {"sample_id": ids, "y": ys, "z": zs, "score": scores}
-    ).astype({**_LABEL_DTYPES, "score": "float32"}).to_parquet(path, index=False)
+    save_scores(ids, ys, zs, {"score": scores}, path)
 
 
 def save_esmm_predictions(ids, ys, zs, q_scores, v_scores, path: str) -> None:
-    pd.DataFrame(
-        {"sample_id": ids, "y": ys, "z": zs, "q": q_scores, "v": v_scores}
-    ).astype({**_LABEL_DTYPES, "q": "float32", "v": "float32"}).to_parquet(path, index=False)
+    save_scores(ids, ys, zs, {"q": q_scores, "v": v_scores}, path)
 
 
 class Trainer:
@@ -88,6 +96,10 @@ class Trainer:
         self.seed = tr.get("seed", 42)
         self.grad_clip_norm = tr["grad_clip_norm"]
         self.shuffle_block_size = tr["shuffle_block_size"]
+        # Which validation metric ranks checkpoints. It is a property of the arm,
+        # not of the architecture: the recipe selects the click-only model on its
+        # CTR head and ESMM on its native product.
+        self.checkpoint_metric = tr.get("checkpoint_metric", "ctr_prauc")
         self.out_dir = os.path.join(root_dir, tr["out_dir"])
         self.device = resolve_device(tr.get("gpus", -1))
         es = tr.get("early_stopping", {})
@@ -194,7 +206,7 @@ class Trainer:
                 t0 = time.perf_counter()
                 path = os.path.join(self.out_dir, f"predictions_{split_name}.parquet")
                 ids, ys, zs, scores = self._predict_numpy(model, split_data)
-                save_predictions(ids, ys, zs, scores, path)
+                save_scores(ids, ys, zs, scores, path)
                 logger.info("  %s: %d rows -> %s (%.1fs)", split_name, len(ids), path, time.perf_counter() - t0)
         else:
             for split_name, imps in [("train", dataset.train), ("val", dataset.val), ("test", dataset.test)]:
@@ -322,57 +334,85 @@ class Trainer:
 
         No host->device transfer: the split already lives on self.device.
         """
-        from models.dcn import dcn_loss
-
-        enc, y, _ = split_data.get_batch(batch_idx)
-        loss = dcn_loss(y, model(enc))
+        enc, y, z = split_data.get_batch(batch_idx)
+        if self.model_name == "esmm":
+            from models.esmm import esmm_loss
+            q, v = model(enc)
+            loss = esmm_loss(y, z, q, v)
+        else:
+            from models.dcn import dcn_loss
+            loss = dcn_loss(y, model(enc))
         loss.backward()
         return loss.item()
 
+    def _batch_scores(self, model, enc) -> dict:
+        """Named prediction columns for one encoded batch.
+
+        A single-head model reports one score; ESMM reports its two heads
+        separately, leaving any product to the consumer, so that a head can be
+        scored on its own population as well as inside a product.
+        """
+        if self.model_name == "esmm":
+            q, v = model(enc)
+            return {"q": q, "v": v}
+        return {"score": torch.sigmoid(model(enc))}
+
+    def _selection_inputs(self, scores: dict, y, z) -> tuple:
+        """(score, label) pair the configured checkpoint metric is computed on."""
+        if self.checkpoint_metric == "ctr_prauc":
+            return (scores["q"] if self.model_name == "esmm" else scores["score"]), y
+        if self.checkpoint_metric == "ctcvr_prauc":
+            return scores["q"] * scores["v"], y * z
+        raise ValueError(f"Unknown checkpoint_metric: {self.checkpoint_metric!r}")
+
     def _predict_numpy(self, model, split_data) -> tuple:
-        """Return (sample_ids, ys, zs, scores) as numpy arrays from a SplitData."""
+        """Return (sample_ids, ys, zs, scores) from a SplitData, as numpy arrays.
+
+        `scores` is the column -> array mapping `save_scores` writes out.
+        """
         model.eval()
-        ids_out, ys_out, zs_out, scores_out = [], [], [], []
+        ids_out, ys_out, zs_out = [], [], []
+        scores_out = {}
         n = len(split_data)
         with torch.no_grad():
             for start in range(0, n, self.batch_size):
                 idx = torch.arange(start, min(start + self.batch_size, n),
                                    device=split_data.device)
                 enc, y, z = split_data.get_batch(idx)
-                logit = model(enc)
                 ids_out.append(split_data.sample_ids[idx].cpu())
                 ys_out.append(y.cpu())
                 zs_out.append(z.cpu())
-                scores_out.append(torch.sigmoid(logit).cpu())
+                for column, score in self._batch_scores(model, enc).items():
+                    scores_out.setdefault(column, []).append(score.cpu())
         return (
             torch.cat(ids_out).numpy(),
             torch.cat(ys_out).numpy(),
             torch.cat(zs_out).numpy(),
-            torch.cat(scores_out).numpy(),
+            {c: torch.cat(parts).numpy() for c, parts in scores_out.items()},
         )
 
     def _val_score_numpy(self, model, val_split) -> float:
-        """Compute validation CTR PR-AUC in batches (bounds activation memory).
+        """Compute the validation checkpoint metric in batches.
 
-        PR-AUC, not AUC: it is the checkpoint-selection metric, and on a ~4%
-        positive rate it separates models that ROC-AUC ranks almost equally.
+        Batched to bound activation memory. PR-AUC, not AUC: on these positive
+        rates it separates models that ROC-AUC ranks almost equally.
         """
         from evaluation.metrics import compute_metrics
         model.eval()
-        all_scores, all_y = [], []
+        all_scores, all_labels = [], []
         eval_batch = self.eval_batch_size
         n = len(val_split)
         with torch.no_grad():
             for start in range(0, n, eval_batch):
                 idx = torch.arange(start, min(start + eval_batch, n),
                                    device=val_split.device)
-                enc, y, _ = val_split.get_batch(idx)
-                logit = model(enc)
-                all_scores.append(torch.sigmoid(logit).cpu())
-                all_y.append(y.cpu())
-        scores = torch.cat(all_scores).numpy()
-        ys = torch.cat(all_y).numpy()
-        return compute_metrics(scores, ys)["pr_auc"]
+                enc, y, z = val_split.get_batch(idx)
+                score, label = self._selection_inputs(self._batch_scores(model, enc), y, z)
+                all_scores.append(score.cpu())
+                all_labels.append(label.cpu())
+        return compute_metrics(
+            torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
+        )["pr_auc"]
 
     # ------------------------------------------------------------------
     # Internal: forward + backward

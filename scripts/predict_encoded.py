@@ -25,7 +25,7 @@ if _CODE_DIR not in sys.path:
 import torch  # noqa: E402
 
 from training.dataset import CommonTable, SplitData  # noqa: E402
-from training.trainer import Trainer, resolve_device, save_predictions  # noqa: E402
+from training.trainer import Trainer, resolve_device, save_scores  # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -40,7 +40,10 @@ def build_model(model_type: str, vocab_sizes: dict, params: dict):
     if model_type == "dcn":
         from models.dcn import DCNv2
         return DCNv2(vocab_sizes, **params)
-    raise ValueError(f"predict_encoded supports dcn only, got {model_type!r}")
+    if model_type == "esmm":
+        from models.esmm import ESMM
+        return ESMM(vocab_sizes, **params)
+    raise ValueError(f"Unknown model_type: {model_type!r}")
 
 
 def main():
@@ -77,7 +80,7 @@ def main():
 
     t0 = time.perf_counter()
     ids, ys, zs, scores = Trainer(cfg, _ROOT_DIR)._predict_numpy(model, split)
-    save_predictions(ids, ys, zs, scores, out_path)
+    save_scores(ids, ys, zs, scores, out_path)
     logger.info("%s: %d rows -> %s (%.1fs)", args.split, len(ids), out_path,
                 time.perf_counter() - t0)
     if torch.cuda.is_available():

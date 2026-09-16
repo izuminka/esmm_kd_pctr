@@ -17,7 +17,7 @@ _ROOT_DIR = os.path.dirname(_CODE_DIR)
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
-from data.raw import iter_impressions
+from data.raw import is_validation, iter_impressions
 from training.trainer import Trainer, save_predictions, save_esmm_predictions
 
 
@@ -36,13 +36,16 @@ def _load_checkpoint(path: str):
     return model, ckpt
 
 
-def _select_split(imps: list, split: str, val_frac: float) -> list:
-    n_train = int(len(imps) * (1 - val_frac))
-    if split == "train":
-        return imps[:n_train]
-    if split == "val":
-        return imps[n_train:]
-    return imps  # "test" is the full test set
+def _select_split(imps: list, split: str) -> list:
+    """Select a split by the same per-row hash rule preprocess.py applied.
+
+    The split is defined by example id, not by position, so slicing a fraction
+    off the front would evaluate on rows the model trained on.
+    """
+    if split == "test":
+        return imps  # the official test population is never resplit
+    want_val = split == "val"
+    return [imp for imp in imps if is_validation(imp.sample_id) == want_val]
 
 
 def main():
@@ -59,18 +62,18 @@ def main():
     )
 
     model, ckpt = _load_checkpoint(args.checkpoint)
-    val_frac = ckpt["val_frac"]
 
     tar_split = "train" if args.split in ("train", "val") else "test"
     tar_path = os.path.join(args.data_dir, f"sample_{tar_split}.tar.gz")
     print(f"Loading {args.split} impressions from {tar_path}...")
     all_imps = list(iter_impressions(tar_path, tar_split))
-    imps = _select_split(all_imps, args.split, val_frac)
-    print(f"  {len(imps)} impressions (val_frac={val_frac})")
+    imps = _select_split(all_imps, args.split)
+    print(f"  {len(imps)} impressions in split {args.split!r}")
 
     cfg = {"model": ckpt["model_type"], "training": {"batch_size": 4096,
                                                      "eval_batch_size": 4096, "gpus": -1,
-                                                       "out_dir": ".", "val_frac": val_frac}}
+                                                       "out_dir": ".", "eval_batch_size": 4096,
+                                                     "grad_clip_norm": 0}}
     trainer = Trainer(cfg, _ROOT_DIR)
     if ckpt["model_type"] == "esmm":
         ids, ys, zs, qs, vs = trainer.predict_esmm(model, imps, ckpt["vocabs"], ckpt["field_ids"])

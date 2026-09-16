@@ -27,14 +27,13 @@ _CSV_DIR = os.path.join(_ROOT_DIR, "ali-cpp", "extracted")
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
-from data.raw import iter_impressions_from_csv  # noqa: E402
+from data.raw import is_validation, iter_impressions_from_csv  # noqa: E402
 from data.vocab import encode_batch  # noqa: E402
 from training.dataset import NumpyDataset  # noqa: E402
 
 _N_BAGS = 4000       # common_features rows to copy into the fixture
 _N_ROWS = 400        # skeleton rows (that reference those bags) to keep
 _SCAN_LIMIT = 400_000  # skeleton lines to scan looking for matches
-_VAL_FRAC = 0.25
 
 pytestmark = pytest.mark.skipif(
     not os.path.exists(os.path.join(_CSV_DIR, "common_features_train.csv")),
@@ -90,8 +89,9 @@ def encoded(tmp_path_factory):
     cfg_path = base / "cfg.yaml"
     cfg_path.write_text(yaml.safe_dump({
         "model": "dcn",
-        "training": {"val_frac": _VAL_FRAC, "epochs": 1, "batch_size": 64,
-                     "eval_batch_size": 128, "lr": 1e-3,
+        "training": {"epochs": 1, "batch_size": 64,
+                     "eval_batch_size": 128, "lr": 1e-3, "grad_clip_norm": 0,
+                     "shuffle_block_size": 128,
                      "gpus": 0, "out_dir": str(base / "artifacts")},
         "data": {"csv_dir": str(csv_dir), "encoded_dir": str(enc_dir)},
     }))
@@ -122,14 +122,16 @@ def test_batch_matches_materialised_join(encoded):
     ds = NumpyDataset.load(enc_dir, device=torch.device("cpu"))
 
     # Legacy path: data.raw merges the common bag into each impression itself.
-    imps = list(iter_impressions_from_csv(csv_dir, "train", n_workers=1))
-    n_train = int(len(imps) * (1 - _VAL_FRAC))
+    # Select the split the same way preprocess did -- by id hash, not position.
+    imps = [i for i in iter_impressions_from_csv(csv_dir, "train", n_workers=1)
+            if not is_validation(i.sample_id)]
+    n_train = len(imps)
     assert len(ds.train) == n_train, (len(ds.train), n_train)
 
     with open(os.path.join(enc_dir, "vocab.pkl"), "rb") as f:
         vocab = pickle.load(f)
 
-    expected = encode_batch(imps[:n_train], ds.field_ids, vocab)
+    expected = encode_batch(imps, ds.field_ids, vocab)
     actual, y, z = ds.train.get_batch(list(range(n_train)))
 
     assert set(actual) == set(expected)
@@ -138,16 +140,17 @@ def test_batch_matches_materialised_join(encoded):
         want = _bags(expected[field_id], n_train)
         assert got == want, f"field {field_id} differs"
 
-    assert y.tolist() == [float(i.y) for i in imps[:n_train]]
-    assert z.tolist() == [float(i.z) for i in imps[:n_train]]
+    assert y.tolist() == [float(i.y) for i in imps]
+    assert z.tolist() == [float(i.z) for i in imps]
 
 
 def test_arbitrary_row_order(encoded):
     """Indices are gathered independently, so a shuffled batch must still match."""
     enc_dir, csv_dir, _ = encoded
     ds = NumpyDataset.load(enc_dir, device=torch.device("cpu"))
-    imps = list(iter_impressions_from_csv(csv_dir, "train", n_workers=1))
-    n_train = int(len(imps) * (1 - _VAL_FRAC))
+    imps = [i for i in iter_impressions_from_csv(csv_dir, "train", n_workers=1)
+            if not is_validation(i.sample_id)]
+    n_train = len(imps)
 
     with open(os.path.join(enc_dir, "vocab.pkl"), "rb") as f:
         vocab = pickle.load(f)
@@ -204,7 +207,8 @@ def test_trains_end_to_end(encoded, tmp_path):
     ds = NumpyDataset.load(enc_dir, device=torch.device("cpu"))
 
     cfg = {"model": "dcn", "training": {
-        "epochs": 1, "batch_size": 64, "eval_batch_size": 128, "lr": 1e-3, "val_frac": _VAL_FRAC,
+        "epochs": 1, "batch_size": 64, "eval_batch_size": 128, "lr": 1e-3,
+        "grad_clip_norm": 0, "shuffle_block_size": 128,
         "seed": 42, "gpus": 0, "out_dir": out,
     }}
     model = DCNv2(ds.vocab_sizes, emb_dim=8, cross_rank=4,
@@ -229,31 +233,33 @@ def test_test_split_can_be_left_unloaded(encoded):
     ds.train.get_batch([0])  # train path unaffected
 
 
-def test_val_frac_comes_from_disk_not_config(encoded, tmp_path):
-    """The checkpoint must record the split that exists, not the config's wish.
+def test_split_rule_matches_paper_reference_vectors():
+    """Pin the SplitMix64 variant the paper's census implies.
 
-    evaluate.py/predict.py re-slice raw impressions by ckpt["val_frac"], so if a
-    training config disagreed with how preprocess.py actually split the data,
-    they would score on rows the model trained on.
+    The bare finalizer (no golden-gamma step) is the other common reading of
+    "splitmix64(x)"; it puts ~315 different rows in validation across the full
+    train split, which is invisible until the reproduced numbers drift. These
+    vectors are the standard SplitMix64 outputs for a zero seed.
     """
-    from models.dcn import DCNv2
-    from training.trainer import Trainer
+    from data.raw import _VAL_THRESHOLD, splitmix64
+
+    assert splitmix64(0) == 0xE220A8397B1DCDAF
+    assert splitmix64(0xE220A8397B1DCDAF ^ 0) != 0  # sanity: mixes, not identity
+    assert _VAL_THRESHOLD == 1_844_674_407_370_955_264
+
+
+def test_train_and_val_are_disjoint_and_hash_determined(encoded):
+    """Every encoded row sits on the side of the split its id hashes to."""
+    from data.raw import is_validation
 
     enc_dir, _, _ = encoded
     ds = NumpyDataset.load(enc_dir, device=torch.device("cpu"))
-    assert ds.val_frac == _VAL_FRAC
 
-    wrong = _VAL_FRAC + 0.4  # a config that disagrees with the encoded split
-    cfg = {"model": "dcn", "training": {
-        "epochs": 1, "batch_size": 64, "eval_batch_size": 128, "lr": 1e-3, "val_frac": wrong,
-        "seed": 42, "gpus": 0, "out_dir": str(tmp_path / "art"),
-    }}
-    model = DCNv2(ds.vocab_sizes, emb_dim=8, cross_rank=4,
-                  num_cross_layers=1, deep_hidden_dims=[8])
-    ckpt_path = Trainer(cfg, root_dir="/").fit(model, ds, metric_fn=None)
-
-    ckpt = torch.load(ckpt_path, weights_only=False)
-    assert ckpt["val_frac"] == _VAL_FRAC, "checkpoint recorded the config's val_frac"
+    train_ids = ds.train.sample_ids.tolist()
+    val_ids = ds.val.sample_ids.tolist()
+    assert not (set(train_ids) & set(val_ids)), "a row landed in both splits"
+    assert all(not is_validation(i) for i in train_ids)
+    assert all(is_validation(i) for i in val_ids)
 
 
 def test_offsets_are_csr(encoded):

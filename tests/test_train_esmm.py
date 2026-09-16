@@ -31,7 +31,7 @@ def _make_cfg(out_dir: str, epochs: int = 1) -> dict:
             "batch_size": 256,
             "eval_batch_size": 512,
             "lr": 1e-3,
-            "val_frac": 0.2,
+            "grad_clip_norm": 0, "shuffle_block_size": 128,
             "seed": 42,
             "gpus": 0,    # CPU for tests (no GPU dependency)
             "out_dir": str(out_dir),
@@ -63,7 +63,7 @@ def artifacts(tmp_path_factory):
 
 def test_checkpoint_keys(artifacts):
     ckpt = torch.load(os.path.join(artifacts, "esmm_model.pt"), weights_only=False)
-    assert set(ckpt.keys()) == {"model_type", "model_state_dict", "vocabs", "field_ids", "vocab_sizes", "val_frac", "model_params"}
+    assert set(ckpt.keys()) == {"model_type", "model_state_dict", "vocabs", "field_ids", "vocab_sizes", "split_rule", "model_params"}
     assert ckpt["model_type"] == "esmm"
     assert len(ckpt["field_ids"]) > 0
     assert set(ckpt["vocab_sizes"].keys()) == set(ckpt["field_ids"])

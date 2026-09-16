@@ -18,7 +18,7 @@ from models.dcn import DCNv2
 from training.trainer import Dataset, Trainer, save_predictions
 from evaluation.dcn import evaluate_dcn
 
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ali-cpp")
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "ali-ccp")
 _TRAIN_TAR = os.path.join(_DATA_DIR, "sample_train.tar.gz")
 _TEST_TAR = os.path.join(_DATA_DIR, "sample_test.tar.gz")
 

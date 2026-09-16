@@ -28,6 +28,6 @@ model_params:
 
 data:
   # paths relative to project root
-  csv_dir: ali-cpp/extracted   # directory containing common_features_{train,test}.csv etc.
-  encoded_dir: ali-cpp/encoded # preprocessed numpy arrays (run scripts/preprocess.py once)
+  csv_dir: ali-ccp/extracted   # directory containing common_features_{train,test}.csv etc.
+  encoded_dir: ali-ccp/encoded # preprocessed numpy arrays (run scripts/preprocess.py once)
   # field_ids: omit to use all fields discovered in training data

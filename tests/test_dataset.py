@@ -22,7 +22,7 @@ import yaml
 
 _CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ROOT_DIR = os.path.dirname(_CODE_DIR)
-_CSV_DIR = os.path.join(_ROOT_DIR, "ali-cpp", "extracted")
+_CSV_DIR = os.path.join(_ROOT_DIR, "ali-ccp", "extracted")
 
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)

@@ -3,7 +3,7 @@
 Usage:
     python scripts/evaluate.py --checkpoint artifacts/dcn_model.pt --split val
     python scripts/evaluate.py --checkpoint artifacts/dcn_model.pt --split test \\
-        --data-dir /path/to/ali-cpp
+        --data-dir /path/to/ali-ccp
 """
 
 import argparse
@@ -52,7 +52,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate a saved model checkpoint.")
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint")
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
-    parser.add_argument("--data-dir", default=os.path.join(_ROOT_DIR, "ali-cpp"),
+    parser.add_argument("--data-dir", default=os.path.join(_ROOT_DIR, "ali-ccp"),
                         help="Directory containing sample_{train,test}.tar.gz")
     args = parser.parse_args()
 

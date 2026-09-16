@@ -30,7 +30,7 @@ code/
   requirements.txt   # pinned dependency versions
 ```
 
-Data files (`ali-cpp/sample_{train,test}.tar.gz`, the official Ali-CCP
+Data files (`ali-ccp/sample_{train,test}.tar.gz`, the official Ali-CCP
 release) live one level up, outside this directory.
 
 ## Design notes

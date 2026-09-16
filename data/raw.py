@@ -1,6 +1,6 @@
 """Streaming reader/parser for the official Ali-CCP release.
 
-File format (confirmed against the actual `ali-cpp/*.tar.gz` files):
+File format (confirmed against the actual `ali-ccp/*.tar.gz` files):
   sample_skeleton_{train,test}.csv:
     sample_id,y,z,common_feature_index,num_features,feature_list
   common_features_{train,test}.csv:

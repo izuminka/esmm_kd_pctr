@@ -11,7 +11,7 @@ FIELD_IDS = [
     "128", "129", "150_14", "205", "206", "207", "210", "216", "301", "508", "509",
     "702", "853",
 ]
-TAR_PATH = os.path.join(os.path.dirname(__file__), "..", "ali-cpp", "sample_train.tar.gz")
+TAR_PATH = os.path.join(os.path.dirname(__file__), "..", "ali-ccp", "sample_train.tar.gz")
 
 
 @pytest.fixture(scope="session")

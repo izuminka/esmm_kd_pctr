@@ -5,7 +5,7 @@ import pytest
 import torch
 from torch import nn
 
-from model.esmm import esmm_loss, ESMM
+from models.esmm import esmm_loss, ESMM
 
 
 # --- model architecture and init ---

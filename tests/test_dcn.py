@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch import nn
 
-from model.dcn import _CrossLayer, _normalize_weights, dcn_loss, DCNv2
+from models.dcn import _CrossLayer, _normalize_weights, dcn_loss, DCNv2
 
 
 # --- weight normalization (the pooling mechanic that differs from ESMM) ---

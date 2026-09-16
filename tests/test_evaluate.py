@@ -2,9 +2,9 @@ import torch
 
 from data.raw import Impression
 from data.vocab import build_vocabs, encode_batch
-from evaluate import evaluate_esmm
-from metrics import compute_metrics
-from model.esmm import ESMM
+from evaluation.esmm import evaluate_esmm
+from evaluation.metrics import compute_metrics
+from models.esmm import ESMM
 
 
 def _make_synthetic_batch():

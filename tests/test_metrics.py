@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from metrics import auc, calibration_ratio, compute_metrics, normalized_entropy, pr_auc
+from evaluation.metrics import auc, calibration_ratio, compute_metrics, normalized_entropy, pr_auc
 
 
 # --- auc ---

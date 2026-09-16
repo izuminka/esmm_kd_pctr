@@ -4,7 +4,7 @@ __pycache__/
 .venv/
 artifacts/
 ../ali-cpp/extracted/
-../encoded/
+../ali-cpp/encoded/
 ../bash_scripts/
 ../artifacts/
 ../logs/

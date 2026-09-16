@@ -78,7 +78,7 @@ def _gather_index(starts: torch.Tensor, lengths: torch.Tensor, total: int,
 class CommonTable:
     """The unique common-feature bags, encoded once and shared across rows.
 
-    Written by preprocess.py to encoded/common_{train,test}/.  Many
+    Written by preprocess.py to ali-cpp/encoded/common_{train,test}/.  Many
     impressions point at the same row here, which is what keeps the whole
     dataset small enough to hold on a single GPU.
     """

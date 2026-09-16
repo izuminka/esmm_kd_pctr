@@ -29,6 +29,7 @@ def _make_cfg(out_dir: str, epochs: int = 1) -> dict:
         "training": {
             "epochs": epochs,
             "batch_size": 256,
+            "eval_batch_size": 512,
             "lr": 1e-3,
             "val_frac": 0.2,
             "seed": 42,

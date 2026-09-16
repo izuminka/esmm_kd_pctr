@@ -127,6 +127,23 @@ def extract_tar(tar_path: str, out_dir: str) -> None:
     logger.info("Extraction complete")
 
 
+def seek_to_line_start(f, offset: int) -> None:
+    """Position binary file `f` at the first line beginning at or after `offset`.
+
+    Byte-range chunking splits mid-line, so a chunk must skip the partial line it
+    lands in.  Skipping unconditionally drops a line whenever `offset` happens to
+    fall exactly on a line start: the previous chunk stops before it (its end is
+    not < end) and this one discards it, so no chunk reads it.  Checking the
+    preceding byte distinguishes the two cases.
+    """
+    if offset <= 0:
+        f.seek(0)
+        return
+    f.seek(offset - 1)
+    if f.read(1) != b"\n":
+        f.readline()  # we landed mid-line; drop the remainder
+
+
 def _parse_common_features_chunk(path: str, start: int, end: int) -> dict:
     """Parse lines in byte range [start, end) from a plain common_features CSV.
 
@@ -137,9 +154,7 @@ def _parse_common_features_chunk(path: str, start: int, end: int) -> dict:
     """
     result = {}
     with open(path, "rb") as f:
-        f.seek(start)
-        if start > 0:
-            f.readline()  # discard the partial line at the start of this chunk
+        seek_to_line_start(f, start)
         while f.tell() < end:
             raw = f.readline()
             if not raw:

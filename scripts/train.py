@@ -13,9 +13,11 @@ All training logic lives in training/trainer.py.
 import argparse
 import logging
 import os
+import subprocess
 import sys
 import time
 
+import torch
 import yaml
 
 _CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,7 +88,39 @@ def main():
     trainer = Trainer(cfg, _ROOT_DIR)
 
     checkpoint = trainer.fit(model, dataset, metric_fn)
-    logger.info("Done. Checkpoint: %s", checkpoint)
+    logger.info("Checkpoint: %s", checkpoint)
+
+    # Release the training state before touching the test split: together they
+    # exceed one card, which is why load_test defaults to false.
+    del dataset, model, trainer
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    if not load_test:
+        _run(["predict_encoded.py", "--config", args.config, "--split", "test"],
+             "Exporting test predictions")
+    _run(["report_metrics.py", "--config-model", cfg["model"],
+          "--artifacts", os.path.join(_ROOT_DIR, cfg["training"]["out_dir"]),
+          "--json-out", os.path.join(_ROOT_DIR, cfg["training"]["out_dir"],
+                                     f"metrics_{cfg['model']}.json")],
+         "Metrics (paper evaluation recipe)")
+    logger.info("Done.")
+
+
+def _run(script_args: list, banner: str) -> None:
+    """Run a sibling script in its own process.
+
+    Subprocesses rather than in-process calls: the prediction pass needs the
+    device memory training just gave up, and only process exit guarantees the
+    caching allocator has actually returned it.
+    """
+    cmd = [sys.executable, "-u", os.path.join(_CODE_DIR, "scripts", script_args[0])]
+    cmd += script_args[1:]
+    logger.info("=== %s ===", banner)
+    result = subprocess.run(cmd, cwd=_CODE_DIR)
+    if result.returncode != 0:
+        logger.error("%s failed (exit %d): %s", banner, result.returncode, " ".join(cmd))
+        raise SystemExit(result.returncode)
 
 
 if __name__ == "__main__":

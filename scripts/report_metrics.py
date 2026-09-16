@@ -45,7 +45,8 @@ def _populations(df: pd.DataFrame, model: str) -> dict:
 def main():
     ap = argparse.ArgumentParser(description="Report metrics from prediction parquets.")
     ap.add_argument("--artifacts", default=os.path.join(_ROOT_DIR, "artifacts"))
-    ap.add_argument("--model", default="dcn", choices=["dcn", "esmm"])
+    ap.add_argument("--model", "--config-model", dest="model",
+                    default="dcn", choices=["dcn", "esmm"])
     ap.add_argument("--json-out", default=None, help="also write the table as JSON")
     args = ap.parse_args()
 

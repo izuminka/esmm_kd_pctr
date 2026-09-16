@@ -11,8 +11,9 @@ training:
   seed: 42
   shuffle_block_size: 65536  # epoch shuffling permutes blocks, not rows
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
-  load_test: true     # false leaves the test split on disk to save VRAM,
-                      # which also skips its prediction export
+  load_test: false    # test + its common table are ~17 GB; holding them beside
+                      # train, val and the optimizer state exceeds one 40 GB card.
+                      # scripts/predict_encoded.py exports test afterwards.
   out_dir: artifacts  # relative to project root (parent of code/)
   early_stopping:
     patience: 2       # paper: patience two, zero minimum delta

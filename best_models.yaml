@@ -1,0 +1,52 @@
+# Best finished run per model, ranked on the validation checkpoint metric.
+# scripts/train.py rewrites an entry when a run beats it; review the diff and commit.
+# Checkpoint paths are relative to the artifacts root. Test metrics are recorded
+# for reference and never used for ranking.
+esmm:
+  run: 20260916T232414Z
+  checkpoint: esmm/20260916T232414Z/best.pt
+  selected_on:
+    metric: ctcvr_prauc
+    split: val
+    value: 0.001973585682784685
+    epoch: 3
+  test:
+    CTR:
+      auc: 0.596957152355585
+      pr_auc: 0.05537128232384811
+      ne: 1.0959933850630612
+      ce: 1.4277279172868935
+    CTCVR:
+      auc: 0.6084999661249627
+      pr_auc: 0.00035736891302062704
+      ne: 1.436278075096819
+      ce: 2.327685732735182
+    pCVR:
+      auc: 0.6242807985756257
+      pr_auc: 0.009574056802477231
+      ne: 1.593996240653033
+      ce: 1.3314339484774333
+  trained_from:
+    commit: 28b7960eb9a8fec86ab4c57ef6f03b5531d35b54
+    dirty: true
+    untracked:
+    - best_models.yaml
+    - models/esmm_logged_pctr.py
+    - tests/conftest.py
+    - tests/test_esmm_logged_pctr.py
+    - tests/test_runs.py
+    - training/runs.py
+  data:
+    train:
+      n_rows: 38070359
+      n_clicks: 1479954
+      n_conversions: 7927
+    val:
+      n_rows: 4229546
+      n_clicks: 164302
+      n_conversions: 875
+    test:
+      n_rows: 43016614
+      n_clicks: 1673447
+      n_conversions: 9195
+  finished_at: '2026-09-16T23:33:07Z'

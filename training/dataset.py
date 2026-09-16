@@ -197,14 +197,12 @@ class NumpyDataset:
         test: SplitData,
         vocab: dict,
         field_ids: list,
-        val_frac: float,
     ):
         self.train = train
         self.val = val
         self.test = test
         self.vocab = vocab
         self.field_ids = field_ids
-        self.val_frac = val_frac  # the split actually on disk, per split_meta.json
 
     @property
     def vocab_sizes(self) -> dict:
@@ -219,10 +217,8 @@ class NumpyDataset:
         All tensors are copied to `device` at load time, so training does
         zero-copy indexing with no per-batch host<->device transfers.
 
-        The train/val split is fixed on disk by preprocess.py, so `val_frac` is
-        read back from split_meta.json rather than taken as an argument — a
-        caller-supplied value could disagree with the data and would then be
-        written into the checkpoint, sending evaluate.py to the wrong rows.
+        The train/val split is fixed on disk by preprocess.py, which assigns
+        each row by hashing its example id; there is no split fraction to pass.
 
         load_test=False leaves `test` and its common table on disk, freeing the
         VRAM they would occupy; only the prediction export needs them.
@@ -247,12 +243,9 @@ class NumpyDataset:
             common_test = CommonTable(os.path.join(encoded_dir, "common_test"), field_ids, device)
             test = SplitData(os.path.join(encoded_dir, "test"), field_ids, common_test, device)
 
-        with open(os.path.join(encoded_dir, "train", "split_meta.json")) as f:
-            val_frac = json.load(f)["val_frac"]
-
         logger.info(
-            "Loaded on %s — train=%d  val=%d  test=%s  (val_frac=%s, %d common bags)",
+            "Loaded on %s — train=%d  val=%d  test=%s  (%d common bags)",
             device, len(train), len(val), len(test) if test else "not loaded",
-            val_frac, len(common_train),
+            len(common_train),
         )
-        return cls(train, val, test, vocab, field_ids, val_frac)
+        return cls(train, val, test, vocab, field_ids)

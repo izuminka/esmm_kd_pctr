@@ -21,6 +21,9 @@ from data.vocab import encode_batch
 
 logger = logging.getLogger(__name__)
 
+# Recorded in every checkpoint so a model states how its data was split.
+SPLIT_RULE = "validation iff splitmix64(sample_id xor 42) < 1844674407370955264"
+
 
 def resolve_device(gpus: int) -> torch.device:
     """Pick the single device to train on.
@@ -83,7 +86,8 @@ class Trainer:
         self.eval_batch_size = tr["eval_batch_size"]
         self.lr = tr["lr"]
         self.seed = tr.get("seed", 42)
-        self.val_frac = tr["val_frac"]
+        self.grad_clip_norm = tr["grad_clip_norm"]
+        self.shuffle_block_size = tr["shuffle_block_size"]
         self.out_dir = os.path.join(root_dir, tr["out_dir"])
         self.device = resolve_device(tr.get("gpus", -1))
         es = tr.get("early_stopping", {})
@@ -125,16 +129,6 @@ class Trainer:
         vocabs = dataset.vocab if use_numpy else dataset.vocabs
         field_ids = dataset.field_ids
 
-        # The encoded split is authoritative: evaluate.py/predict.py re-slice raw
-        # impressions by the checkpoint's val_frac, so recording the config's
-        # value instead would send them to rows the model trained on.
-        val_frac = dataset.val_frac if use_numpy else self.val_frac
-        if use_numpy and val_frac != self.val_frac:
-            logger.warning(
-                "config val_frac=%s but the encoded data was split at %s; using %s. "
-                "Re-run preprocess.py to change the split.",
-                self.val_frac, val_frac, val_frac,
-            )
 
         logger.info(
             "Training %s | %d epochs | batch=%d | lr=%s | device=%s | early_stopping(patience=%d, min_delta=%s)",
@@ -147,7 +141,7 @@ class Trainer:
         for epoch in range(1, self.epochs + 1):
             t0 = time.perf_counter()
             if use_numpy:
-                loss = self._train_epoch_numpy(model, dataset.train, optimizer)
+                loss = self._train_epoch_numpy(model, dataset.train, optimizer, epoch - 1)
             else:
                 loss = self.train_epoch(model, dataset.train, dataset.vocabs, field_ids, optimizer)
             epoch_secs = time.perf_counter() - t0
@@ -170,7 +164,7 @@ class Trainer:
                     "vocabs": vocabs,
                     "field_ids": field_ids,
                     "vocab_sizes": dataset.vocab_sizes,
-                    "val_frac": val_frac,
+                    "split_rule": SPLIT_RULE,
                 }
                 if self.model_name == "esmm":
                     ckpt_data["model_params"] = {
@@ -270,18 +264,35 @@ class Trainer:
     # NumpyDataset-backed epoch/predict/val helpers
     # ------------------------------------------------------------------
 
-    def _train_epoch_numpy(self, model, split_data, optimizer) -> float:
-        """One shuffled epoch over a SplitData; returns mean batch loss."""
+    def _epoch_order(self, n: int, epoch: int, device: torch.device) -> torch.Tensor:
+        """Row order for one epoch: permute blocks, keep rows within a block.
+
+        The recipe shuffles at block granularity with a generator seeded
+        seed+epoch, rather than permuting rows, so consecutive rows stay
+        together and only the block sequence varies between epochs.
+        """
+        bs = self.shuffle_block_size
+        n_blocks = (n + bs - 1) // bs
+        g = torch.Generator().manual_seed(self.seed + epoch)
+        order = torch.randperm(n_blocks, generator=g)
+        starts = order.to(torch.int64) * bs
+        lengths = torch.clamp(torch.full((n_blocks,), bs) - torch.clamp(starts + bs - n, min=0),
+                              min=0)
+        idx = torch.cat([torch.arange(s, s + l) for s, l in zip(starts.tolist(), lengths.tolist())])
+        return idx.to(device)
+
+    def _train_epoch_numpy(self, model, split_data, optimizer, epoch: int = 0) -> float:
+        """One epoch over a SplitData in block-shuffled order; mean batch loss."""
         model.train()
         n = len(split_data)
-        indices = list(range(n))
-        random.shuffle(indices)
+        indices = self._epoch_order(n, epoch, split_data.device)
         total_loss, n_batches = 0.0, 0
 
         for start in range(0, n, self.batch_size):
             batch_idx = indices[start : start + self.batch_size]
             optimizer.zero_grad()
             loss_val = self._train_step_numpy(model, split_data, batch_idx)
+            self._clip_dense_grads(model)
             optimizer.step()
             total_loss += loss_val
             n_batches += 1
@@ -290,6 +301,21 @@ class Trainer:
                 logger.debug("  batch %d/%d  loss=%.4f", n_batches, n // self.batch_size, loss_val)
 
         return total_loss / n_batches if n_batches else 0.0
+
+    def _clip_dense_grads(self, model) -> None:
+        """Clip dense gradients to grad_clip_norm, leaving embeddings untouched.
+
+        Embedding gradients are per-row and sparse in effect; clipping them with
+        the dense parameters would scale every touched row by a norm dominated
+        by the dense layers.
+        """
+        if not self.grad_clip_norm:
+            return
+        embedding_params = {id(p) for p in model.embeddings.parameters()}
+        dense = [p for p in model.parameters()
+                 if id(p) not in embedding_params and p.grad is not None]
+        if dense:
+            torch.nn.utils.clip_grad_norm_(dense, self.grad_clip_norm)
 
     def _train_step_numpy(self, model, split_data, batch_idx: list) -> float:
         """Forward + backward for a NumpyDataset batch.
@@ -326,7 +352,11 @@ class Trainer:
         )
 
     def _val_score_numpy(self, model, val_split) -> float:
-        """Compute validation AUC in batches (bounds activation memory)."""
+        """Compute validation CTR PR-AUC in batches (bounds activation memory).
+
+        PR-AUC, not AUC: it is the checkpoint-selection metric, and on a ~4%
+        positive rate it separates models that ROC-AUC ranks almost equally.
+        """
         from evaluation.metrics import compute_metrics
         model.eval()
         all_scores, all_y = [], []
@@ -342,7 +372,7 @@ class Trainer:
                 all_y.append(y.cpu())
         scores = torch.cat(all_scores).numpy()
         ys = torch.cat(all_y).numpy()
-        return compute_metrics(scores, ys)["auc"]
+        return compute_metrics(scores, ys)["pr_auc"]
 
     # ------------------------------------------------------------------
     # Internal: forward + backward

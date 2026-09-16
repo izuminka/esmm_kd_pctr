@@ -54,6 +54,7 @@ if _CODE_DIR not in sys.path:
 
 from data.raw import (
     _load_common_features_parallel,
+    is_validation,
     iter_impressions_from_csv,
     parse_skeleton_line,
     seek_to_line_start,
@@ -75,6 +76,17 @@ _CF_ROW: dict = {}  # {cf_index: dense row index into the common table}
 _CF_BAGS: dict = {}  # {cf_index: FeatureBag} — only for the common-table pool
 _VOCAB: dict = {}   # {field_id: {token_str: token_id}}
 _FIELD_IDS: list = []
+_SPLIT_NAMES: tuple = ("train", "val")  # ("test",) when encoding the test source
+
+
+# ---------------------------------------------------------------------------
+# Validation split — fixed by hashing the example id, not by row position
+# ---------------------------------------------------------------------------
+
+def _split_of(sample_id: int) -> str:
+    if _SPLIT_NAMES == ("test",):
+        return "test"
+    return "val" if is_validation(sample_id) else "train"
 
 
 # ---------------------------------------------------------------------------
@@ -82,12 +94,19 @@ _FIELD_IDS: list = []
 # ---------------------------------------------------------------------------
 
 def build_vocab_streaming(csv_dir: str, field_ids: list, n_workers: int) -> dict:
-    """Build vocab by streaming train skeleton once; never holds all rows in RAM."""
-    logger.info("Building vocab (streaming train split)...")
+    """Build vocab by streaming train skeleton once; never holds all rows in RAM.
+
+    Validation rows are excluded: the vocabulary is fit on the training
+    population only, so tokens that appear solely in validation stay unseen
+    (id 0, weight masked) exactly as they would at serving time.
+    """
+    logger.info("Building vocab (streaming train split, excluding validation)...")
     tokens_by_field: dict[str, set] = {f: set() for f in field_ids}
     count = 0
     t0 = time.perf_counter()
     for imp in iter_impressions_from_csv(csv_dir, "train", n_workers=n_workers):
+        if is_validation(imp.sample_id):
+            continue
         for field_id, entries in imp.fields.items():
             if field_id in tokens_by_field:
                 tokens_by_field[field_id].update(str(feat_id) for feat_id, _ in entries)
@@ -217,8 +236,14 @@ def _encode_chunk_worker(sk_path: str, byte_start: int, byte_end: int,
     Writes per-chunk numpy files to tmp_dir.
     Returns (prefix_path, n_rows_encoded).
     """
-    sample_ids, ys, zs, cf_rows = [], [], [], []
-    acc: dict = {f: {"ids": [], "weights": [], "offsets": []} for f in _FIELD_IDS}
+    # Rows are routed to their split here rather than sliced afterwards: the
+    # split rule is per-row, so train and validation rows interleave and no
+    # contiguous row range corresponds to a split.
+    out = {
+        s: {"sid": [], "y": [], "z": [], "cf": [],
+            "acc": {f: {"ids": [], "weights": [], "offsets": []} for f in _FIELD_IDS}}
+        for s in _SPLIT_NAMES
+    }
 
     with open(sk_path, "rb") as f:
         seek_to_line_start(f, byte_start)
@@ -234,13 +259,14 @@ def _encode_chunk_worker(sk_path: str, byte_start: int, byte_end: int,
             if cf_row is None:
                 continue
 
-            sample_ids.append(imp.sample_id)
-            ys.append(imp.y)
-            zs.append(imp.z)
-            cf_rows.append(cf_row)
+            o = out[_split_of(imp.sample_id)]
+            o["sid"].append(imp.sample_id)
+            o["y"].append(imp.y)
+            o["z"].append(imp.z)
+            o["cf"].append(cf_row)
 
             for field_id in _FIELD_IDS:
-                a = acc[field_id]
+                a = o["acc"][field_id]
                 a["offsets"].append(len(a["ids"]))
                 for feat_id, weight in imp.fields.get(field_id, []):
                     token_id = _VOCAB[field_id].get(str(feat_id), 0)
@@ -248,26 +274,29 @@ def _encode_chunk_worker(sk_path: str, byte_start: int, byte_end: int,
                     a["weights"].append(0.0 if token_id == 0 else weight)
 
     prefix = os.path.join(tmp_dir, f"{chunk_id:05d}")
-    np.save(f"{prefix}_sid.npy", np.array(sample_ids, dtype=np.int64))
-    np.save(f"{prefix}_y.npy",   np.array(ys, dtype=np.int8))
-    np.save(f"{prefix}_z.npy",   np.array(zs, dtype=np.int8))
-    np.save(f"{prefix}_cf.npy",  np.array(cf_rows, dtype=np.int32))
-    for field_id in _FIELD_IDS:
-        a = acc[field_id]
-        fn = field_id.replace("/", "_")
-        np.save(f"{prefix}_{fn}_ids.npy", np.array(a["ids"],     dtype=np.int32))
-        np.save(f"{prefix}_{fn}_wts.npy", np.array(a["weights"], dtype=np.float32))
-        np.save(f"{prefix}_{fn}_off.npy", np.array(a["offsets"], dtype=np.int64))
+    counts = {}
+    for split, o in out.items():
+        np.save(f"{prefix}_{split}_sid.npy", np.array(o["sid"], dtype=np.int64))
+        np.save(f"{prefix}_{split}_y.npy",   np.array(o["y"], dtype=np.int8))
+        np.save(f"{prefix}_{split}_z.npy",   np.array(o["z"], dtype=np.int8))
+        np.save(f"{prefix}_{split}_cf.npy",  np.array(o["cf"], dtype=np.int32))
+        for field_id in _FIELD_IDS:
+            a = o["acc"][field_id]
+            fn = field_id.replace("/", "_")
+            np.save(f"{prefix}_{split}_{fn}_ids.npy", np.array(a["ids"],     dtype=np.int32))
+            np.save(f"{prefix}_{split}_{fn}_wts.npy", np.array(a["weights"], dtype=np.float32))
+            np.save(f"{prefix}_{split}_{fn}_off.npy", np.array(a["offsets"], dtype=np.int64))
+        counts[split] = len(o["sid"])
 
-    return prefix, len(sample_ids)
+    return prefix, counts
 
 
 def _parallel_encode(sk_path: str, cf_row: dict, vocab: dict, field_ids: list,
-                      n_workers: int, tmp_dir: str) -> list:
-    """Encode sk_path in parallel.  Returns list of (prefix, n_rows) sorted by chunk id."""
-    global _CF_ROW, _VOCAB, _FIELD_IDS
+                      n_workers: int, tmp_dir: str, split_names: tuple) -> list:
+    """Encode sk_path in parallel.  Returns list of (prefix, counts) by chunk id."""
+    global _CF_ROW, _VOCAB, _FIELD_IDS, _SPLIT_NAMES
     # Set globals BEFORE forking so workers inherit via COW (no pickling of large dicts)
-    _CF_ROW, _VOCAB, _FIELD_IDS = cf_row, vocab, field_ids
+    _CF_ROW, _VOCAB, _FIELD_IDS, _SPLIT_NAMES = cf_row, vocab, field_ids, split_names
 
     size = os.path.getsize(sk_path)
     chunk_size = size // n_workers
@@ -286,8 +315,8 @@ def _parallel_encode(sk_path: str, cf_row: dict, vocab: dict, field_ids: list,
         results = pool.starmap(_encode_chunk_worker, args)
 
     results.sort(key=lambda r: r[0])  # sort by prefix (=chunk id) to preserve row order
-    total_rows = sum(r[1] for r in results)
-    logger.info("Encoding done: %d rows total", total_rows)
+    totals = {s: sum(r[1][s] for r in results) for s in split_names}
+    logger.info("Encoding done: %s", "  ".join(f"{s}={n:,}" for s, n in totals.items()))
     return results
 
 
@@ -295,99 +324,69 @@ def _parallel_encode(sk_path: str, cf_row: dict, vocab: dict, field_ids: list,
 # Merge chunk files → final split directories
 # ---------------------------------------------------------------------------
 
-def _merge_chunks(results: list, field_ids: list, out_dirs: list,
-                   val_frac: float = 0.0) -> None:
-    """Concatenate chunk arrays and write to one or more output directories.
+def _merge_chunks(results: list, field_ids: list, split_dirs: dict) -> None:
+    """Concatenate each split's chunk arrays into its output directory.
 
-    If two out_dirs are given (train + val), the first 1-val_frac fraction
-    goes to out_dirs[0] and the remainder to out_dirs[1].
-    If one out_dir is given, all rows go there.
-
-    Since rows are stored in order and each chunk writes tokens sequentially,
-    the token data for any contiguous row range [a, b) is guaranteed to
-    occupy a contiguous slice of the global flat array.  We exploit this to
-    avoid a Python per-row loop (which would take hours at 34 M rows × 23 fields).
+    Workers already routed every row to its split, so a split's rows are the
+    concatenation of its per-chunk arrays in chunk order -- no positional
+    slicing, which the hash-based validation rule would make meaningless.
     """
     t0 = time.perf_counter()
-    logger.info("Merging %d chunks → %s", len(results), [os.path.basename(d) for d in out_dirs])
-
     prefixes = [r[0] for r in results]
+    logger.info("Merging %d chunks -> %s", len(results), sorted(split_dirs))
 
-    # ---- Label arrays (small: ~42M × 10 bytes each) ----------------------------
-    sid_all = np.concatenate([np.load(f"{p}_sid.npy") for p in prefixes])
-    y_all   = np.concatenate([np.load(f"{p}_y.npy")   for p in prefixes])
-    z_all   = np.concatenate([np.load(f"{p}_z.npy")   for p in prefixes])
-    cf_all  = np.concatenate([np.load(f"{p}_cf.npy")  for p in prefixes])
-
-    n_total = len(sid_all)
-    if len(out_dirs) == 2:
-        n_train = int(n_total * (1 - val_frac))
-        # row ranges: (start_row, end_row) — end is exclusive
-        row_ranges = [(0, n_train), (n_train, n_total)]
-    else:
-        row_ranges = [(0, n_total)]
-
-    for out_dir, (rs, re) in zip(out_dirs, row_ranges):
+    for split, out_dir in split_dirs.items():
         os.makedirs(out_dir, exist_ok=True)
-        # Record the split actually written; the checkpoint must report this,
-        # not whatever val_frac a later training config happens to carry.
+
+        sid = np.concatenate([np.load(f"{p}_{split}_sid.npy") for p in prefixes])
+        y   = np.concatenate([np.load(f"{p}_{split}_y.npy")   for p in prefixes])
+        z   = np.concatenate([np.load(f"{p}_{split}_z.npy")   for p in prefixes])
+        cf  = np.concatenate([np.load(f"{p}_{split}_cf.npy")  for p in prefixes])
+        n_rows = len(sid)
+
         with open(os.path.join(out_dir, "split_meta.json"), "w") as f:
-            json.dump({"val_frac": val_frac, "n_rows": re - rs}, f)
-        np.save(os.path.join(out_dir, "sample_id.npy"), sid_all[rs:re])
-        np.save(os.path.join(out_dir, "y.npy"),         y_all[rs:re])
-        np.save(os.path.join(out_dir, "z.npy"),         z_all[rs:re])
-        np.save(os.path.join(out_dir, "cf_row.npy"),    cf_all[rs:re])
-        logger.info("  [%s] labels saved (%d rows)", os.path.basename(out_dir), re - rs)
-    del sid_all, y_all, z_all, cf_all
+            json.dump({"split": split, "n_rows": int(n_rows),
+                       "n_clicks": int(y.sum()), "n_conversions": int(z.sum())}, f)
+        np.save(os.path.join(out_dir, "sample_id.npy"), sid)
+        np.save(os.path.join(out_dir, "y.npy"), y)
+        np.save(os.path.join(out_dir, "z.npy"), z)
+        np.save(os.path.join(out_dir, "cf_row.npy"), cf)
+        logger.info("  [%s] %d rows, %d clicks, %d conversions",
+                    split, n_rows, int(y.sum()), int(z.sum()))
+        del sid, y, z, cf
 
-    # ---- Per-field token arrays -------------------------------------------------
-    for field_id in field_ids:
-        fn = field_id.replace("/", "_")
+        for field_id in field_ids:
+            fn = field_id.replace("/", "_")
+            ids_parts, wts_parts, off_parts, tok_counts, row_counts = [], [], [], [], []
+            for p in prefixes:
+                ids_c = np.load(f"{p}_{split}_{fn}_ids.npy")
+                off_c = np.load(f"{p}_{split}_{fn}_off.npy")
+                ids_parts.append(ids_c)
+                wts_parts.append(np.load(f"{p}_{split}_{fn}_wts.npy"))
+                off_parts.append(off_c)
+                tok_counts.append(len(ids_c))
+                row_counts.append(len(off_c))
 
-        # Load all chunk files; track each chunk's token count to fix offsets.
-        ids_parts, wts_parts, off_parts = [], [], []
-        tok_counts: list[int] = []      # number of tokens in each chunk
-        row_counts: list[int] = []      # number of rows   in each chunk
-        for p in prefixes:
-            ids_c = np.load(f"{p}_{fn}_ids.npy")
-            wts_c = np.load(f"{p}_{fn}_wts.npy")
-            off_c = np.load(f"{p}_{fn}_off.npy")
-            ids_parts.append(ids_c)
-            wts_parts.append(wts_c)
-            off_parts.append(off_c)
-            tok_counts.append(len(ids_c))
-            row_counts.append(len(off_c))
+            ids_all = np.concatenate(ids_parts); del ids_parts
+            wts_all = np.concatenate(wts_parts); del wts_parts
+            off_all = np.concatenate(off_parts); del off_parts
 
-        ids_all = np.concatenate(ids_parts); del ids_parts
-        wts_all = np.concatenate(wts_parts); del wts_parts
+            # Each chunk's offsets restart at 0; shift by the running token base.
+            base = row_ptr = 0
+            for tok_n, row_n in zip(tok_counts, row_counts):
+                off_all[row_ptr:row_ptr + row_n] += base
+                base += tok_n
+                row_ptr += row_n
 
-        # Fix per-chunk offsets: each chunk resets to 0; add cumulative token base.
-        off_all = np.concatenate(off_parts); del off_parts
-        base = 0
-        row_ptr = 0
-        for tok_n, row_n in zip(tok_counts, row_counts):
-            off_all[row_ptr:row_ptr + row_n] += base
-            base    += tok_n
-            row_ptr += row_n
+            # CSR: n+1 entries, final one the total token count.
+            out_off = np.empty(n_rows + 1, dtype=np.int64)
+            out_off[:-1] = off_all
+            out_off[-1] = len(ids_all)
 
-        # Vectorized write: token data for a contiguous row range [rs, re) is
-        # the contiguous token slice [off_all[rs], off_all[re]) (or end of array
-        # when re == n_total).  No Python per-row loop needed.
-        for out_dir, (rs, re) in zip(out_dirs, row_ranges):
-            # off_all has one entry per row, so an index at n_total (an empty
-            # trailing range, e.g. val_frac=0) means "past the last token".
-            tok_start = int(off_all[rs]) if rs < n_total else len(ids_all)
-            tok_end   = int(off_all[re]) if re < n_total else len(ids_all)
-            # Local offsets for this slice — subtract the global token base, then
-            # append the total so offsets are CSR (n+1) and row i spans [i]:[i+1].
-            out_off = np.empty(re - rs + 1, dtype=np.int64)
-            out_off[:-1] = off_all[rs:re] - tok_start
-            out_off[-1] = tok_end - tok_start
-            np.save(os.path.join(out_dir, f"{fn}_ids.npy"),     ids_all[tok_start:tok_end])
-            np.save(os.path.join(out_dir, f"{fn}_weights.npy"), wts_all[tok_start:tok_end])
+            np.save(os.path.join(out_dir, f"{fn}_ids.npy"), ids_all)
+            np.save(os.path.join(out_dir, f"{fn}_weights.npy"), wts_all)
             np.save(os.path.join(out_dir, f"{fn}_offsets.npy"), out_off)
-
-        del ids_all, wts_all, off_all
+            del ids_all, wts_all, off_all
 
     logger.info("Merge complete (%.1fs)", time.perf_counter() - t0)
 
@@ -406,7 +405,6 @@ def main():
 
     csv_dir     = os.path.join(_ROOT_DIR, cfg["data"]["csv_dir"])
     encoded_dir = os.path.join(_ROOT_DIR, cfg["data"]["encoded_dir"])
-    val_frac    = cfg["training"]["val_frac"]
     n_workers   = os.cpu_count() or 8
 
     os.makedirs(encoded_dir, exist_ok=True)
@@ -458,12 +456,12 @@ def main():
         del cf_train  # workers only need the row map, not the multi-GB bags
 
         with tempfile.TemporaryDirectory(dir=encoded_dir, prefix="tmp_train_") as tmp:
-            results = _parallel_encode(sk_train, cf_row, vocab, field_ids, n_workers, tmp)
-            _merge_chunks(
-                results, field_ids,
-                out_dirs=[os.path.join(encoded_dir, "train"), os.path.join(encoded_dir, "val")],
-                val_frac=val_frac,
-            )
+            results = _parallel_encode(sk_train, cf_row, vocab, field_ids, n_workers, tmp,
+                                       split_names=("train", "val"))
+            _merge_chunks(results, field_ids, {
+                "train": os.path.join(encoded_dir, "train"),
+                "val": os.path.join(encoded_dir, "val"),
+            })
 
     # ------------------------------------------------------------------
     # Step 3: encode test (parallel)
@@ -482,11 +480,9 @@ def main():
         del cf_test
 
         with tempfile.TemporaryDirectory(dir=encoded_dir, prefix="tmp_test_") as tmp:
-            results = _parallel_encode(sk_test, cf_row, vocab, field_ids, n_workers, tmp)
-            _merge_chunks(
-                results, field_ids,
-                out_dirs=[os.path.join(encoded_dir, "test")],
-            )
+            results = _parallel_encode(sk_test, cf_row, vocab, field_ids, n_workers, tmp,
+                                       split_names=("test",))
+            _merge_chunks(results, field_ids, {"test": os.path.join(encoded_dir, "test")})
 
     logger.info("Preprocessing complete. Encoded data at: %s", encoded_dir)
 

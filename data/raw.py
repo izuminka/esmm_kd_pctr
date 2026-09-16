@@ -28,6 +28,39 @@ logger = logging.getLogger(__name__)
 FeatureBag = dict[str, list[tuple[int, float]]]
 
 
+# ---------------------------------------------------------------------------
+# Validation split -- fixed by hashing the example id, not by row position
+# ---------------------------------------------------------------------------
+
+_U64 = (1 << 64) - 1
+_GOLDEN_GAMMA = 0x9E3779B97F4A7C15
+# Truncation of the binary64 value 0.1 * 2**64; floor(2**64 / 10) would differ.
+_VAL_THRESHOLD = 1_844_674_407_370_955_264
+
+
+def splitmix64(x: int) -> int:
+    """SplitMix64 next(): advance the state by the golden gamma, then finalize.
+
+    Verified against the paper's published census — this variant reproduces its
+    train/validation row, click and conversion counts exactly, while applying
+    the finalizer alone does not.
+    """
+    z = (x + _GOLDEN_GAMMA) & _U64
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _U64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _U64
+    return z ^ (z >> 31)
+
+
+def is_validation(sample_id: int) -> bool:
+    """Validation membership, fixed per row by example id rather than position.
+
+    Ali-CCP ships no validation split, so one is carved out of the official
+    train population.  Hashing the id keeps membership identical across runs,
+    orderings and re-materialisations without shipping an index.
+    """
+    return splitmix64((sample_id & _U64) ^ 42) < _VAL_THRESHOLD
+
+
 def _parse_feature_list(feature_list: str) -> FeatureBag:
     fields: FeatureBag = {}
     for entry in feature_list.split("\x01"):

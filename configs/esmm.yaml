@@ -1,20 +1,20 @@
 model: esmm
 
 training:
-  epochs: 100         # max epochs; early stopping will terminate sooner
-  batch_size: 32768   # large batches: labels are ~4.6% clicks / ~0.03% conversions,
-                      # so small batches often contain no positive at all
+  epochs: 5           # paper caps training at five epochs
+  batch_size: 65536   # paper's global batch (4 replicas x 16,384); here one GPU
   eval_batch_size: 65536  # eval runs under no_grad, so it fits a bigger batch
-  lr: 0.001
-  val_frac: 0.2
+  lr: 0.001           # paper's ESMM learning rate
+  grad_clip_norm: 0   # paper: ESMM uses no gradient clipping
   seed: 42
+  shuffle_block_size: 65536  # epoch shuffling permutes blocks, not rows
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
   load_test: true     # false leaves the test split on disk to save VRAM,
                       # which also skips its prediction export
   out_dir: artifacts  # relative to project root (parent of code/)
   early_stopping:
-    patience: 3       # epochs with no improvement before stopping
-    min_delta: 0.0001 # minimum improvement to count as progress
+    patience: 2       # paper: patience two, zero minimum delta
+    min_delta: 0.0
 
 model_params:
   emb_dim: 20

@@ -55,7 +55,7 @@ if _CODE_DIR not in sys.path:
 from data.raw import (
     _load_common_features_parallel,
     is_validation,
-    iter_impressions_from_csv,
+    parse_common_features_line,
     parse_skeleton_line,
     seek_to_line_start,
 )
@@ -93,26 +93,88 @@ def _split_of(sample_id: int) -> str:
 # Vocab building (streaming, no Impression objects held)
 # ---------------------------------------------------------------------------
 
-def build_vocab_streaming(csv_dir: str, field_ids: list, n_workers: int) -> dict:
-    """Build vocab by streaming train skeleton once; never holds all rows in RAM.
+def discover_field_ids(csv_dir: str, n_bags: int = 2_000, n_rows: int = 50_000) -> list:
+    """Field ids present in the release, read from the head of each file.
 
-    Validation rows are excluded: the vocabulary is fit on the training
-    population only, so tokens that appear solely in validation stay unseen
-    (id 0, weight masked) exactly as they would at serving time.
+    Ali-CCP splits its fields across two files, so both are sampled. Reading
+    heads keeps this to seconds; loading the full common-features table just to
+    learn 23 names costs minutes.
     """
-    logger.info("Building vocab (streaming train split, excluding validation)...")
-    tokens_by_field: dict[str, set] = {f: set() for f in field_ids}
-    count = 0
+    found: set = set()
+    cf_path = os.path.join(csv_dir, "common_features_train.csv")
+    sk_path = os.path.join(csv_dir, "sample_skeleton_train.csv")
+    with open(cf_path, encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i >= n_bags:
+                break
+            found.update(parse_common_features_line(line)[1])
+    with open(sk_path, encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i >= n_rows:
+                break
+            imp = parse_skeleton_line(line)
+            if imp is not None:
+                found.update(imp.fields)
+    return sorted(found)
+
+
+def _vocab_chunk_worker(sk_path: str, byte_start: int, byte_end: int) -> dict:
+    """Collect distinct training tokens per field from one byte range.
+
+    Reads the _CF_BAGS / _FIELD_IDS globals inherited through fork.
+    """
+    tokens: dict[str, set] = {f: set() for f in _FIELD_IDS}
+    with open(sk_path, "rb") as f:
+        seek_to_line_start(f, byte_start)
+        while f.tell() < byte_end:
+            raw = f.readline()
+            if not raw:
+                break
+            imp = parse_skeleton_line(raw.decode("utf-8"))
+            if imp is None or is_validation(imp.sample_id):
+                continue
+            bag = _CF_BAGS.get(imp.common_feature_index)
+            if bag is None:
+                continue
+            for field_id, entries in imp.fields.items():
+                if field_id in tokens:
+                    tokens[field_id].update(str(feat_id) for feat_id, _ in entries)
+            for field_id, entries in bag.items():
+                if field_id in tokens:
+                    tokens[field_id].update(str(feat_id) for feat_id, _ in entries)
+    return tokens
+
+
+def build_vocab_streaming(csv_dir: str, field_ids: list, n_workers: int, cf: dict) -> dict:
+    """Fit each field's vocabulary on the training rows of the train split.
+
+    Validation rows are excluded: tokens occurring only there must stay unseen
+    (id 0, weight masked), exactly as an unseen token would at serving time.
+
+    Parallel over byte ranges, merging each worker's sets as they arrive so
+    peak memory stays near the merged vocabulary rather than the sum of all
+    workers' partial copies.
+    """
+    global _CF_BAGS, _FIELD_IDS
     t0 = time.perf_counter()
-    for imp in iter_impressions_from_csv(csv_dir, "train", n_workers=n_workers):
-        if is_validation(imp.sample_id):
-            continue
-        for field_id, entries in imp.fields.items():
-            if field_id in tokens_by_field:
-                tokens_by_field[field_id].update(str(feat_id) for feat_id, _ in entries)
-        count += 1
-        if count % 2_000_000 == 0:
-            logger.info("  vocab pass: %dM rows (%.1fs)", count // 1_000_000, time.perf_counter() - t0)
+    sk_path = os.path.join(csv_dir, "sample_skeleton_train.csv")
+    logger.info("Building vocab from training rows with %d workers...", n_workers)
+
+    _CF_BAGS, _FIELD_IDS = cf, field_ids  # set BEFORE fork for COW inheritance
+    size = os.path.getsize(sk_path)
+    cs = size // n_workers
+    ranges = [(sk_path, i * cs, (i + 1) * cs if i < n_workers - 1 else size)
+              for i in range(n_workers)]
+
+    tokens_by_field: dict[str, set] = {f: set() for f in field_ids}
+    ctx = mp.get_context("fork")
+    with ctx.Pool(n_workers) as pool:
+        for i, part in enumerate(pool.starmap(_vocab_chunk_worker, ranges), 1):
+            for field_id, toks in part.items():
+                tokens_by_field[field_id] |= toks
+            logger.debug("  merged vocab chunk %d/%d", i, len(ranges))
+    _CF_BAGS = {}
+
     vocab = {
         field_id: {token: i + 1 for i, token in enumerate(sorted(tokens))}
         for field_id, tokens in tokens_by_field.items()
@@ -415,6 +477,11 @@ def main():
     vocab_path     = os.path.join(encoded_dir, "vocab.pkl")
     field_ids_path = os.path.join(encoded_dir, "field_ids.json")
 
+    # common_features_train is needed by the vocab pass, the disjointness check
+    # and the common-table encoder; it is 8.6 GB of CSV and minutes to parse, so
+    # load it at most once per run and hand the same dict to all three.
+    cf_train = None
+
     if os.path.exists(vocab_path):
         logger.info("Loading existing vocab from %s", vocab_path)
         with open(vocab_path, "rb") as f:
@@ -422,15 +489,13 @@ def main():
         with open(field_ids_path) as f:
             field_ids = json.load(f)
     else:
-        logger.info("Discovering field IDs from a small sample...")
-        field_ids_set: set = set()
-        for imp in iter_impressions_from_csv(csv_dir, "train", limit=10_000,
-                                              n_workers=min(8, n_workers)):
-            field_ids_set.update(imp.fields.keys())
-        field_ids = sorted(field_ids_set)
+        field_ids = discover_field_ids(csv_dir)
         logger.info("Found %d fields: %s", len(field_ids), field_ids)
 
-        vocab = build_vocab_streaming(csv_dir, field_ids, n_workers)
+        cf_train = _load_common_features_parallel(
+            os.path.join(csv_dir, "common_features_train.csv"), n_workers
+        )
+        vocab = build_vocab_streaming(csv_dir, field_ids, n_workers, cf_train)
         with open(vocab_path, "wb") as f:
             pickle.dump(vocab, f)
         with open(field_ids_path, "w") as f:
@@ -446,14 +511,16 @@ def main():
         logger.info("[train+val] Already encoded, skipping")
     else:
         sk_train = os.path.join(csv_dir, "sample_skeleton_train.csv")
-        cf_train = _load_common_features_parallel(
-            os.path.join(csv_dir, "common_features_train.csv"), n_workers
-        )
+        if cf_train is None:  # vocab was reloaded from disk, so nothing loaded it
+            cf_train = _load_common_features_parallel(
+                os.path.join(csv_dir, "common_features_train.csv"), n_workers
+            )
         _assert_fields_disjoint(sk_train, cf_train)
         cf_row = _encode_common_table(
             cf_train, vocab, field_ids, os.path.join(encoded_dir, "common_train"), n_workers
         )
         del cf_train  # workers only need the row map, not the multi-GB bags
+        cf_train = None
 
         with tempfile.TemporaryDirectory(dir=encoded_dir, prefix="tmp_train_") as tmp:
             results = _parallel_encode(sk_train, cf_row, vocab, field_ids, n_workers, tmp,

@@ -44,6 +44,7 @@ can differ in the final decimal places due to prediction serialization.
 | Same unregularized DCN, cross layers removed | 42 | 0.947040632 | 1 | `dcn_matched_stats_no_cross/20260917T231620Z` |
 | ESMM CTR-selected reference | 43 | 0.945347582 | 1 | `esmm_ctr_reference_seed43/20260917T232216Z` |
 | DCN weight decay 1e-6 | 43 | 0.944848730 | 1 | `dcn_matched_stats_wd1e6_seed43/20260917T232216Z` |
+| Stacked DCN weight decay 1e-6 | 42 | 0.944366388 | 1 | `dcn_matched_stats_wd1e6_stacked/20260917T233749Z` |
 
 The regularized DCN improves NE by about 0.111% at seed 42 and 0.053% at seed
 43. Neither reaches 0.5%. Removing crosses worsens the otherwise matched
@@ -66,12 +67,19 @@ reduces that deterioration but gives a worse best validation result.
 
 ## Experiments in flight
 
-- Slurm 446 is running: `structure: stacked` with weight decay 1e-6; explicit
-  crosses feed the MLP, rather than running parallel to it. Other options match.
+- Slurm 446 finished five training epochs and is exporting the selected
+  checkpoint. Its stacked structure improved on parallel at weight decay 1e-6,
+  but did not beat the parallel 3e-6 model. Validation NE reached 1.5090 by
+  epoch 5, despite falling training BCE, so overfitting remains.
 - Slurm 447: 64-dimensional embeddings with weight decay 3e-6. Only embedding
   width changes from job 444; the raw inputs and evaluation population remain
   fixed. This tests additional capacity under regularization, not equality of
   model parameter counts with ESMM.
+- Slurm 448, after 446: embedding learning rate 1e-4, dense learning rate
+  unchanged at 5e-4, otherwise identical to the best parallel 3e-6 recipe.
+  The hypothesis is that slower embedding updates reduce memorization while
+  preserving the dense network's learning rate. The option is DCN-only and
+  defaults to the existing single-rate Adam behavior.
 
 Use `bash_scripts/train_dcn.sh` with `DCN_CONFIG` pointing to the corresponding
 tracked YAML. The seed-43 comparison is in `bash_scripts/compare_ctr_seed43.sh`.
@@ -113,3 +121,7 @@ of unseen-data improvement.
   .venv/bin/python -m pytest -q tests/test_dcn.py tests/test_esmm_protocol.py
   tests/test_runs.py -k 'not real_data'` passed 79 tests, with one raw-data
   test deselected.
+- Separate-rate optimizer tests verify that embedding updates are scaled as
+  configured while dense updates remain identical, all parameters are covered
+  exactly once, and invalid rates are rejected. These tests plus the ESMM
+  protocol suite passed 43 tests after introducing the optional rate.

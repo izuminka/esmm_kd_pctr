@@ -131,6 +131,13 @@ class Trainer:
         self.batch_size = tr["batch_size"]
         self.eval_batch_size = tr["eval_batch_size"]
         self.lr = tr["lr"]
+        self.embedding_lr = tr.get("embedding_lr")
+        if self.embedding_lr is not None:
+            self.embedding_lr = float(self.embedding_lr)
+            if self.model_name != "dcn":
+                raise ValueError("embedding_lr is currently supported only for DCN")
+            if not np.isfinite(self.embedding_lr) or self.embedding_lr <= 0:
+                raise ValueError("embedding_lr must be finite and positive")
         self.weight_decay = tr.get("weight_decay", 0.0)
         self.seed = tr.get("seed", 42)
         self.grad_clip_norm = tr["grad_clip_norm"]
@@ -165,6 +172,21 @@ class Trainer:
     # Public API
     # ------------------------------------------------------------------
 
+    def _make_optimizer(self, model):
+        if self.embedding_lr is None:
+            parameters = model.parameters()
+        else:
+            embedding_parameters = list(model.embeddings.parameters())
+            embedding_ids = {id(p) for p in embedding_parameters}
+            dense_parameters = [p for p in model.parameters() if id(p) not in embedding_ids]
+            parameters = [
+                {"params": embedding_parameters, "lr": self.embedding_lr},
+                {"params": dense_parameters, "lr": self.lr},
+            ]
+            logger.info("Optimizer rates: embeddings=%s dense=%s weight_decay=%s",
+                        self.embedding_lr, self.lr, self.weight_decay)
+        return torch.optim.Adam(parameters, lr=self.lr, weight_decay=self.weight_decay)
+
     def fit(self, model, dataset, metric_fn) -> str:
         """Train model, checkpoint best by metric_fn, export predictions.
 
@@ -194,9 +216,7 @@ class Trainer:
 
         device = self.device
         model = model.to(device)
-        optimizer = torch.optim.Adam(
-            model.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        )
+        optimizer = self._make_optimizer(model)
         checkpoint_path = os.path.join(self.out_dir, "best.pt")
         history_path = os.path.join(self.out_dir, "history.csv")
         history_extras = tuple(

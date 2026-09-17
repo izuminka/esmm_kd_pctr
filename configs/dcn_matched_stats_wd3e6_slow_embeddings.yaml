@@ -1,0 +1,37 @@
+# Change only embedding learning rate; dense rate stays 5e-4.
+model: dcn
+training:
+  epochs: 5
+  batch_size: 65536
+  eval_batch_size: 65536
+  lr: 0.0005
+  weight_decay: 3.0e-06
+  grad_clip_norm: 10
+  seed: 42
+  shuffle_block_size: 1
+  checkpoint_metric: ctr_ne
+  keep_checkpoint: best
+  save_predictions: true
+  evaluate_test: false
+  gpus: -1
+  load_test: false
+  out_dir: artifacts
+  early_stopping:
+    enabled: false
+    patience: 2
+    min_delta: 0.0
+  embedding_lr: 0.0001
+model_params:
+  emb_dim: 20
+  cross_rank: 128
+  num_cross_layers: 4
+  deep_hidden_dims:
+  - 512
+  - 256
+  - 128
+  dropout: 0.1
+  pooling: mean
+  bag_stats: true
+data:
+  csv_dir: ali-ccp/extracted
+  encoded_dir: ali-ccp/encoded

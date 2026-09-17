@@ -15,15 +15,16 @@ from training.trainer import Trainer
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
-def test_full_half_quarter_differ_only_in_training_cohort():
+def test_matched_cohort_arms_differ_only_in_training_cohort():
     full = load_config(CONFIGS / "esmm.yaml")
-    for name, fraction in (("esmm_half", .5), ("esmm_quarter", .25)):
+    for name, fraction in (("esmm_half", .5), ("esmm_third", "1/3"),
+                           ("esmm_quarter", .25)):
         cfg = load_config(CONFIGS / f"{name}.yaml")
         assert cfg["data"].pop("train_cohort")["fraction"] == fraction
         assert cfg == full
-    assert full["training"]["checkpoint_metric"] == "ctcvr_prauc"
+    assert full["training"]["checkpoint_metric"] == "pcvr_ne"
     assert full["training"]["keep_checkpoint"] == "best"
-    assert full["training"]["early_stopping"] == {"enabled": True, "patience": 2, "min_delta": 0.0}
+    assert full["training"]["early_stopping"] == {"enabled": False, "patience": 2, "min_delta": 0.0}
     assert set(full["logged_pctr"]["predictions"]) == {"test"}
 
 
@@ -31,7 +32,10 @@ def test_full_half_quarter_differ_only_in_training_cohort():
 def test_native_and_logged_configs_use_their_prescribed_validation_score(config):
     cfg = load_config(config)
     logged = cfg["model"] == "esmm_logged_pctr"
-    assert cfg["training"]["checkpoint_metric"] == ("logged_ctcvr_prauc" if logged else "ctcvr_prauc")
+    native_metric = "pcvr_ne" if config.stem in {
+        "esmm", "esmm_half", "esmm_third", "esmm_quarter"
+    } else "ctcvr_prauc"
+    assert cfg["training"]["checkpoint_metric"] == ("logged_ctcvr_prauc" if logged else native_metric)
     assert ("val" in logged_ctcvr_splits(cfg)) == logged
     assert "train" not in logged_ctcvr_splits(cfg)
 
@@ -90,8 +94,8 @@ def test_validation_and_export_use_only_allowed_logged_scores(tmp_path, objectiv
     _, y, z, scores = trainer._predict_numpy(model, split, split_name="val")
     assert ("p" in scores) == (objective is not None)
     expected = {r["population"]: r for r in metric_rows("val", cfg["model"], y.astype("int8"), z.astype("int8"), scores)}
-    population = "CTCVR-logged" if objective is not None else "CTCVR"
-    assert score == expected[population]["pr_auc"]
+    population = "CTCVR-logged" if objective is not None else "pCVR"
+    assert score == expected[population]["pr_auc" if objective else "ne"]
     assert extras["val_pcvr_ne"] == pytest.approx(expected["pCVR"]["ne"])
     assert any("logged" in c for c in extras) == (objective is not None)
     _, _, _, train_scores = trainer._predict_numpy(model, split, split_name="train")
@@ -123,12 +127,16 @@ def test_native_fit_with_loaded_test_needs_only_test_logged_scores(tmp_path):
         assert any(r["population"] == "CTCVR-logged" for r in rows) == (split == "test")
 
 
+@pytest.mark.parametrize("metric", ["ctcvr_prauc", "pcvr_ne"])
 @pytest.mark.parametrize("keep,enabled,expected_epochs,expected_kept", [
     ("best", True, 4, 2), ("best", False, 5, 2),
     ("last", True, 5, 5), ("last", False, 5, 5), ("last", None, 5, 5),
 ])
-def test_stopping_restores_the_selected_weights(tmp_path, monkeypatch, keep, enabled, expected_epochs, expected_kept):
+def test_stopping_restores_the_selected_weights(tmp_path, monkeypatch, keep, enabled, expected_epochs, expected_kept, metric):
     cfg = tiny_cfg(tmp_path)
+    # Exercise stopping and restoration independently of the default run budget.
+    cfg["training"]["epochs"] = 5
+    cfg["training"]["checkpoint_metric"] = metric
     cfg["training"]["keep_checkpoint"] = keep
     if enabled is None:
         cfg["training"]["early_stopping"].pop("enabled", None)
@@ -138,7 +146,7 @@ def test_stopping_restores_the_selected_weights(tmp_path, monkeypatch, keep, ena
     data = NumpyDataset(TinySplit(), TinySplit(), None, {"f": {str(i): i for i in range(1, 9)}}, ["f"])
     model = build_model(cfg, data.vocab_sizes)
     trainer = Trainer(cfg, str(tmp_path))
-    scores = iter([.1, .2, .15, .14, .13])
+    scores = iter([1.1, .8, .9, 1.0, 1.2] if metric == "pcvr_ne" else [.1, .2, .15, .14, .13])
 
     def train_epoch(model, split, optimizer, epoch):
         with torch.no_grad():

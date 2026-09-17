@@ -1,0 +1,46 @@
+# ESMM one-third control: canonical ESMM on a fixed, label-independent cohort
+# nested within the half cohort. Validation and test use their full populations.
+model: esmm
+
+training:
+  epochs: 5
+  batch_size: 65536
+  eval_batch_size: 65536
+  lr: 0.001
+  grad_clip_norm: 0
+  seed: 42
+  shuffle_block_size: 1
+  checkpoint_metric: pcvr_ne  # minimize CVR NE on clicked validation impressions
+  keep_checkpoint: best
+  save_predictions: false
+  gpus: -1
+  load_test: false
+  out_dir: artifacts
+  early_stopping:
+    enabled: false            # run all five epochs, then restore minimum pCVR NE
+    patience: 2
+    min_delta: 0.0
+
+model_params:
+  emb_dim: 20
+  tower_dims: [460, 360, 200, 80, 2]
+  aux_weight: 1.0
+
+# Logged pCTR is used only for the test CTCVR-logged (p*v) report.
+logged_pctr:
+  dcn_run: artifacts/dcn/20260916T232126Z
+  predictions:
+    test: artifacts/dcn/20260916T232126Z/predictions/test.parquet
+  score_column: score
+
+evaluation:
+  is_logged_ctcvr: true
+
+data:
+  csv_dir: ali-ccp/extracted
+  encoded_dir: ali-ccp/encoded
+  train_cohort:
+    fraction: 1/3             # exact rational; 12,690,119 of 38,070,359 rows
+    ranks: 4
+    block_size: 65536
+    seed: 42

@@ -170,7 +170,9 @@ class Trainer:
         Accepts either a NumpyDataset (preferred, no Python Impression objects)
         or the legacy Dataset (list-of-Impression).
 
-        metric_fn(model, encoded_val, val_y) -> float  (higher = better).
+        Legacy datasets use metric_fn(model, encoded_val, val_y), with val_z
+        as a fourth argument for ESMM. Lower is better for pcvr_ne; other
+        checkpoint metrics are maximized.
         Returns the path of the saved checkpoint.
         """
         from training.dataset import NumpyDataset
@@ -221,7 +223,7 @@ class Trainer:
             self.keep_checkpoint, self.es_enabled, self.es_patience, self.es_min_delta,
         )
 
-        best_score = -float("inf")
+        best_score = float("inf") if self.checkpoint_metric == "pcvr_ne" else -float("inf")
         no_improve = 0
         for epoch in range(1, self.epochs + 1):
             t0 = time.perf_counter()
@@ -234,14 +236,19 @@ class Trainer:
             if use_numpy:
                 score, extras = self._val_score_numpy(model, dataset.val)
             else:
-                score, extras = metric_fn(model, val_encoded, val_y), {}
+                if self.is_esmm:
+                    val_z = torch.tensor([imp.z for imp in dataset.val], dtype=torch.float32, device=device)
+                    score, extras = metric_fn(model, val_encoded, val_y, val_z), {}
+                else:
+                    score, extras = metric_fn(model, val_encoded, val_y), {}
 
             logger.info(
                 "Epoch %d/%d  loss=%.4f  val_score=%.4f  time=%.1fs %s",
                 epoch, self.epochs, loss, score, epoch_secs,
                 "  ".join(f"{k}={v:.6f}" for k, v in extras.items()),
             )
-            improved = score > best_score + self.es_min_delta
+            improved = (score < best_score - self.es_min_delta if self.checkpoint_metric == "pcvr_ne"
+                        else score > best_score + self.es_min_delta)
             # Last mode saves every epoch and always runs the full epoch budget.
             saved = improved or self.keep_checkpoint == "last"
             # Appended per epoch so a run that dies mid-training keeps its history.
@@ -486,6 +493,9 @@ class Trainer:
                                  f"score; this model reports {sorted(scores)}")
             return scores[name]
 
+        if self.checkpoint_metric == "pcvr_ne":
+            clicked = y == 1
+            return column("v")[clicked], z[clicked]
         if self.checkpoint_metric == "ctr_prauc":
             return column("q" if self.is_esmm else "score"), y
         if self.checkpoint_metric == "ctcvr_prauc":
@@ -550,6 +560,8 @@ class Trainer:
                                {c: s.numpy() for c, s in scores.items()})
             extras = {f"val_{_HISTORY_POPULATIONS[row['population']]}_{suffix}": row[metric]
                       for row in rows for metric, suffix in _HISTORY_METRICS.items()}
+        if self.checkpoint_metric == "pcvr_ne":
+            return extras["val_pcvr_ne"], extras
         return pr_auc(score.numpy(), label.numpy()), extras
 
     # ------------------------------------------------------------------

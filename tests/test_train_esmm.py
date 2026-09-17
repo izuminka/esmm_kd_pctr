@@ -54,7 +54,7 @@ def artifacts(tmp_path_factory):
 
     dataset = Dataset(train=train_imps, val=val_imps, test=test_imps, vocabs=vocabs, field_ids=field_ids)
     model = ESMM(dataset.vocab_sizes)
-    metric_fn = lambda m, enc, y: evaluate_esmm(m, enc, y, torch.zeros_like(y), is_logged_ctcvr=False)["ctr"]["auc"]
+    metric_fn = lambda m, enc, y, z: evaluate_esmm(m, enc, y, z, is_logged_ctcvr=False)["ctr"]["auc"]
 
     trainer = Trainer(cfg, root_dir=out)
     trainer.out_dir = out

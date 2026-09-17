@@ -1,12 +1,12 @@
 # ESMM evaluation protocol
 
-`configs/esmm.yaml`, `esmm_half.yaml`, and `esmm_quarter.yaml` use the same
+`configs/esmm.yaml`, `esmm_half.yaml`, `esmm_third.yaml`, and `esmm_quarter.yaml` use the same
 training and evaluation settings. Only `data.train_cohort` differs. The quarter
 cohort is nested in half; validation and test always use their full populations.
 
 | Model | Conversion score in training | Validation selection | Logged pCTR files needed |
 | --- | --- | --- | --- |
-| ESMM full / half / quarter | `q*v` | Native CTCVR PR-AUC (`q*v`) | Test |
+| ESMM full / half / third / quarter | `q*v` | Lowest clicked-pCVR NE (`v`, `y == 1`) | Test |
 | Logged-pCTR KD / teacher variants | `q*v`; `p` supplies the CTR soft target | Logged CTCVR PR-AUC (`p*v`) | Train, validation, test |
 | Logged-pCTR product-only | `p*v` | Logged CTCVR PR-AUC (`p*v`) | Train, validation, test |
 
@@ -18,15 +18,15 @@ include `p*v`; test reports include it when `evaluation.is_logged_ctcvr` is true
 Turning that flag off does not remove logged-model validation: KD and product-only
 still require validation logged scores for checkpoint selection.
 
-For the full/half/quarter controls:
+For the matched ESMM cohort controls:
 
 - Seed Python, NumPy, and Torch with `training.seed` before constructing the
-  model. All three use seed 42 and the same vocabulary and architecture.
+  model. All controls use seed 42 and the same vocabulary and architecture.
   GPU kernels are not forced to be deterministic.
-- Validate after every epoch; maximize complete-validation native CTCVR average
-  precision (`ctcvr_prauc`).
-- Train for at most five epochs. Stop after two consecutive epochs without a
-  strictly higher score (`min_delta: 0.0`).
+- Validate after every epoch; minimize clicked-validation pCVR normalized
+  entropy (`pcvr_ne`). NE is recorded as a positive loss, with lower better.
+- Train for exactly five epochs with early stopping disabled. Retain the
+  strictly lowest NE (`min_delta: 0.0`); ties retain the earlier checkpoint.
 - Restore the best checkpoint before reporting any final split metrics.
 - Record AUC, PR-AUC, NE, and CE for CTR, native CTCVR, and clicked pCVR each
   epoch in `history.csv`. KD additionally records logged CTCVR; product-only

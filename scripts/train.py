@@ -75,7 +75,9 @@ def build_metric_fn(cfg: dict):
         return lambda model, enc, y: evaluate_dcn(model, enc, y)["ctr"]["auc"]
     if cfg["model"] == "esmm":
         from evaluation.esmm import evaluate_esmm
-        return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z, is_logged_ctcvr=False)["ctcvr"]["pr_auc"]
+        population, metric = (("pcvr", "ne") if cfg["training"].get("checkpoint_metric") == "pcvr_ne"
+                              else ("ctcvr", "pr_auc"))
+        return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z, is_logged_ctcvr=False)[population][metric]
     if cfg["model"] == "esmm_logged_pctr":
         return None  # encoded data path only, where the trainer scores validation itself
     raise ValueError(f"Unknown model: {cfg['model']!r}")

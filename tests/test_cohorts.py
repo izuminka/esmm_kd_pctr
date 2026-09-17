@@ -33,6 +33,14 @@ def test_rows_are_distinct_in_range_and_quarter_is_nested_in_half(paper_cohorts)
     assert np.isin(quarter, half).all()
 
 
+def test_exact_one_third_cohort_is_nested_in_half():
+    third, kept = cohort_rows(_N_TRAIN, "1/3", **_SPEC)
+    half, _ = cohort_rows(_N_TRAIN, 0.5, **_SPEC)
+    assert len(third) == 12_690_119
+    assert kept == [3_172_530, 3_172_530, 3_172_530, 3_172_529]
+    assert np.isin(third, half).all()
+
+
 def test_each_range_keeps_its_own_prefix_of_the_block_stream():
     n, block_size = 1_003, 10  # short last block
     rows, kept = cohort_rows(n, 0.5, ranks=4, block_size=block_size, seed=7)

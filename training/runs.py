@@ -207,7 +207,7 @@ def finish_run(run_dir: str, status: str, **fields) -> dict:
 def selection(run_dir: str, metric: str) -> dict:
     """The epoch validation kept, read back from history.csv.
 
-    Checkpoints are saved only on improvement, so the last saved row is the best.
+    The last saved row identifies the exported weights in both best and last modes.
     """
     with open(os.path.join(run_dir, "history.csv"), newline="") as f:
         saved = [row for row in csv.DictReader(f) if row["saved"] == "True"]

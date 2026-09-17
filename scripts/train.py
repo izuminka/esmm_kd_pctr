@@ -15,11 +15,13 @@ pointer files are described in training/runs.py.
 import argparse
 import logging
 import os
+import random
 import signal
 import subprocess
 import sys
 import time
 
+import numpy as np
 import torch
 import yaml
 
@@ -29,7 +31,7 @@ if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
 from data.logged_pctr import attach_logged_pctr
-from scripts.report_metrics import ESMM_MODELS
+from scripts.report_metrics import logged_ctcvr_splits
 from training import cohorts, runs
 from training.trainer import Trainer, resolve_device
 from training.dataset import NumpyDataset
@@ -48,6 +50,12 @@ def load_config(path: str) -> dict:
 
 
 def build_model(cfg: dict, vocab_sizes: dict):
+    # Seed before constructors draw embedding and tower weights. fit() alone is
+    # too late to make initialization reproducible across the cohort arms.
+    seed = cfg.get("training", {}).get("seed", 42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     params = cfg.get("model_params", {})
     if cfg["model"] == "dcn":
         from models.dcn import DCNv2
@@ -91,17 +99,18 @@ def main():
         "Config: %s  model=%s  epochs=%d  batch_size=%d  lr=%s",
         name, cfg["model"], cfg["training"]["epochs"], cfg["training"]["batch_size"], cfg["training"]["lr"],
     )
-    # ESMM-based runs report CTCVR on the logged pCTR unless evaluation.is_logged_ctcvr
-    # turns it off; the logged-pCTR arms also train on it. Either way the source is named.
-    is_logged_ctcvr = cfg["model"] in ESMM_MODELS and cfg.get("evaluation", {}).get("is_logged_ctcvr", True)
+    # Logged-model training and validation use p; native ESMM only uses it for
+    # optional test reporting.
+    logged_splits = logged_ctcvr_splits(cfg)
+    is_logged_ctcvr = bool(logged_splits)
     is_logged_pctr_used = is_logged_ctcvr or cfg["model"] == "esmm_logged_pctr"
     if is_logged_pctr_used and "logged_pctr" not in cfg:
         raise ValueError(f"{args.config}: an {cfg['model']} config needs a logged_pctr block "
                          "naming the DCN run and predictions files the logged pCTR comes from "
                          "(or evaluation.is_logged_ctcvr: false for plain ESMM)")
-    if cfg["training"].get("checkpoint_metric") == "logged_ctcvr_prauc" and not is_logged_ctcvr:
-        raise ValueError(f"{args.config}: checkpoint_metric logged_ctcvr_prauc needs "
-                         "evaluation.is_logged_ctcvr on")
+    if cfg["training"].get("checkpoint_metric") == "logged_ctcvr_prauc" and "val" not in logged_splits:
+        raise ValueError("checkpoint_metric logged_ctcvr_prauc requires esmm_logged_pctr: "
+                         "native ESMM validates on q*v")
 
     encoded_dir = os.path.join(_ROOT_DIR, cfg["data"]["encoded_dir"])
     if not os.path.exists(encoded_dir):
@@ -125,10 +134,13 @@ def main():
                     len(dataset.test) if dataset.test is not None else "not loaded")
 
         logged_pctr_source = None
-        if is_logged_pctr_used:
+        needed_splits = {s: split for s, split in
+                         {"train": dataset.train, "val": dataset.val, "test": dataset.test}.items()
+                         if split is not None and
+                         (s in logged_splits or (s == "train" and cfg["model"] == "esmm_logged_pctr"))}
+        if needed_splits:
             logged_pctr_source = attach_logged_pctr(
-                cfg["logged_pctr"], _ROOT_DIR,
-                {"train": dataset.train, "val": dataset.val, "test": dataset.test})
+                cfg["logged_pctr"], _ROOT_DIR, needed_splits)
             runs.record_logged_pctr(run_dir, logged_pctr_source)
 
         # After logged pCTR: its predictions file matches the full train split row for
@@ -167,18 +179,27 @@ def main():
                       "--run-dir", run_dir, "--metrics-only"], "Scoring test")
         _run(["report_metrics.py", "--model", cfg["model"], "--run-dir", run_dir],
              "Metrics (paper evaluation recipe)")
+
+        # Inside the tracked block: a failure while recording the result must mark
+        # the run FAILED too, rather than leave its run.json at RUNNING forever.
+        run = runs.finish_run(run_dir, runs.FINISHED,
+                              selected_on=runs.selection(run_dir, checkpoint_metric),
+                              test=runs.read_test_metrics(run_dir))
+        runs.update_latest(artifacts_root, name, run_dir)
+        if runs.update_best(args.best_models, name, runs.best_entry(run)):
+            logger.info("New best %s run (%s %.6f); %s updated -- review and commit.",
+                        name, checkpoint_metric, run["selected_on"]["value"],
+                        args.best_models)
     except BaseException as exc:
-        runs.finish_run(run_dir, runs.FAILED, error=f"{type(exc).__name__}: {exc}")
+        error = f"{type(exc).__name__}: {exc}"
+        # A run that already finished stays FINISHED: only the bookkeeping after it
+        # failed, and the pointers it wrote must keep pointing at a finished run.
+        if runs.read_run(run_dir)["status"] == runs.FINISHED:
+            runs.update_run(run_dir, error=error)
+        else:
+            runs.finish_run(run_dir, runs.FAILED, error=error)
         raise
 
-    run = runs.finish_run(run_dir, runs.FINISHED,
-                          selected_on=runs.selection(run_dir, checkpoint_metric),
-                          test=runs.read_test_metrics(run_dir))
-    runs.update_latest(artifacts_root, name, run_dir)
-    if runs.update_best(args.best_models, name, runs.best_entry(run)):
-        logger.info("New best %s run (%s %.6f); %s updated -- review and commit.",
-                    name, checkpoint_metric, run["selected_on"]["value"],
-                    args.best_models)
     logger.info("Done. %s is now latest.", run["run"])
 
 

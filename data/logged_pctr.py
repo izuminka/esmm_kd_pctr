@@ -8,8 +8,9 @@ best-model record:
       predictions: {train: <file>, val: <file>, test: <file>}   # each inside dcn_run
       score_column: score
 
-The scores enter only the training loss; on validation and test they are used
-only to evaluate CTCVR on the logged product.
+The logged-score model uses the train scores in its loss. Other ESMM models do
+not use them for training. Logged-score models (KD and product-only) validate
+on p*v. Native ESMM validates on q*v and uses logged scores only on test.
 
 Scores are joined to a split by sample_id, never by row position, so a
 predictions file written in a different order still lines up. The join runs on
@@ -56,8 +57,13 @@ def _source(block: dict, root_dir: str, split: str) -> tuple[str, str, dict]:
     return file, path, run
 
 
-def load_logged_pctr(block: dict, root_dir: str, split: str,
-                     sample_ids: torch.Tensor, ys: torch.Tensor) -> tuple[torch.Tensor, dict]:
+def load_logged_pctr(
+    block: dict,               # the config's logged_pctr block
+    root_dir: str,             # project root the block's paths are relative to
+    split: str,                # train, val or test
+    sample_ids: torch.Tensor,  # the split's row ids, in the order scores are returned
+    ys: torch.Tensor,          # the split's click labels, checked against the file's
+) -> tuple[torch.Tensor, dict]:
     """Logged pCTR for each row of a split, on `sample_ids.device`, plus its provenance.
 
     `sample_ids` and `ys` are the split's own rows, in the order the scores are

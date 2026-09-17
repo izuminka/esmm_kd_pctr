@@ -32,6 +32,8 @@ if _CODE_DIR not in sys.path:
 import torch  # noqa: E402
 
 from data.logged_pctr import load_logged_pctr  # noqa: E402
+from training import cohorts  # noqa: E402
+from scripts.report_metrics import logged_ctcvr_splits  # noqa: E402
 from training.dataset import CommonTable, SplitData  # noqa: E402
 from training.runs import record_logged_pctr, resolve_run, run_name  # noqa: E402
 from training.trainer import Trainer, resolve_device, save_scores, write_split  # noqa: E402
@@ -113,14 +115,26 @@ def main():
                         run_cfg.get("model_params", {})).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
-    if "logged_pctr" in run_cfg:
+    is_logged_ctcvr = "logged_pctr" in run_cfg and args.split in logged_ctcvr_splits(run_cfg)
+    if is_logged_ctcvr:
         split.logged_pctr, source = load_logged_pctr(run_cfg["logged_pctr"], _ROOT_DIR, args.split,
                                                      split.sample_ids, split.ys)
         if os.path.exists(os.path.join(run_dir, "run.json")):
             record_logged_pctr(run_dir, source)
 
+    # The cohort restriction too: a run trained on a cohort must export the rows it
+    # trained on, not the whole split. Applied after the logged pCTR, which is
+    # attached to the full split and read through the cohort.
+    if args.split == "train" and "train_cohort" in run_cfg.get("data", {}):
+        split = cohorts.restrict(split, run_cfg["data"]["train_cohort"])
+        logger.info("  train cohort: %d rows", len(split))
+
     t0 = time.perf_counter()
-    ids, ys, zs, scores = Trainer(cfg, _ROOT_DIR)._predict_numpy(model, split)
+    # The run's model and its own logged-CTCVR setting decide the score columns,
+    # so an older run without logged pCTR exports exactly what it did before.
+    trainer_cfg = {**cfg, "model": ckpt["model_type"], "model_params": run_cfg.get("model_params", {}),
+                   "evaluation": {"is_logged_ctcvr": is_logged_ctcvr}}
+    ids, ys, zs, scores = Trainer(trainer_cfg, _ROOT_DIR)._predict_numpy(model, split, split_name=args.split)
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         save_scores(ids, ys, zs, scores, args.out)

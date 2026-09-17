@@ -6,6 +6,9 @@ Currently: the ESMM and DCN-V2 models, their losses, evaluation metrics, and
 the data pipeline that feeds them, each built and validated against real data
 one chunk at a time.
 
+The matched ESMM controls and logged-score validation rules are documented in
+[EVALUATION.md](EVALUATION.md).
+
 ## Layout
 
 ```

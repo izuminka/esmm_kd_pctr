@@ -13,8 +13,7 @@ training:
   shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
                          # rows together, which on user-ordered data collapses
                          # a batch to a few hundred distinct users
-  checkpoint_metric: logged_ctcvr_prauc  # paper: every Table 2 arm keeps the best
-                                         # validation PR-AUC of the logged product p*v
+  checkpoint_metric: logged_ctcvr_prauc  # validation p*v matches the training score
   save_predictions: false  # score train/val/test in memory; write metrics only
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
   load_test: false    # test + its common table are ~17 GB; holding them beside
@@ -34,14 +33,14 @@ model_params:
 # described above and is reported as CTCVR-logged (p * v).
 logged_pctr:
   dcn_run: artifacts/dcn/20260916T232126Z  # the dcn entry in best_models.yaml
-  predictions:  # one file per split, inside dcn_run; joined to rows by sample_id
+  predictions:  # only required splits; joined by sample_id
     train: artifacts/dcn/20260916T232126Z/predictions/train.parquet
     val: artifacts/dcn/20260916T232126Z/predictions/val.parquet
     test: artifacts/dcn/20260916T232126Z/predictions/test.parquet
   score_column: score
 
 evaluation:
-  is_logged_ctcvr: true  # also report CTCVR-logged (p * v) beside CTCVR (q * v)
+  is_logged_ctcvr: true  # test report; product training also requires p*v validation
 
 data:
   # paths relative to project root

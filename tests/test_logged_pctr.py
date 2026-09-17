@@ -140,7 +140,7 @@ def _esmm_scores(n=400, seed=0):
 @pytest.mark.parametrize("model", ["esmm", "esmm_logged_pctr"])
 def test_ctcvr_logged_scores_p_times_v_for_every_esmm_model(model):
     y, z, scores = _esmm_scores()
-    rows = {r["population"]: r for r in metric_rows("val", model, y, z, scores)}
+    rows = {r["population"]: r for r in metric_rows("test", model, y, z, scores)}
 
     assert list(rows) == ["CTR", "CTCVR", "CTCVR-logged", "pCVR"]
     expected = compute_metrics(scores["p"] * scores["v"], z)
@@ -184,6 +184,36 @@ def test_a_ctcvr_logged_row_without_a_recorded_source_is_refused():
     rows = metric_rows("test", "esmm", y, z, scores)
     with pytest.raises(SystemExit, match="no logged_pctr source"):
         _attach_logged_pctr_source(rows, {"dcn_run": "artifacts/dcn/r1", "files": {"val": {}}})
+
+
+# --- which score a checkpoint metric selects on ---
+
+
+def _trainer(model, checkpoint_metric, tmp_path):
+    from training.trainer import Trainer
+    return Trainer({"model": model,
+                    "training": {"epochs": 1, "batch_size": 8, "eval_batch_size": 8, "lr": 1e-3,
+                                 "grad_clip_norm": 0, "shuffle_block_size": 1, "gpus": 0,
+                                 "checkpoint_metric": checkpoint_metric, "out_dir": str(tmp_path)}},
+                   str(tmp_path))
+
+
+def test_selection_uses_the_native_product(tmp_path):
+    scores = {"q": torch.tensor([0.4]), "v": torch.tensor([0.5]), "p": torch.tensor([0.2])}
+    y, z = torch.tensor([1.0]), torch.tensor([1.0])
+
+    score, label = _trainer("esmm_logged_pctr", "ctcvr_prauc", tmp_path)._selection_inputs(scores, y, z)
+
+    assert torch.equal(score, scores["q"] * scores["v"]) and torch.equal(label, y * z)
+
+
+def test_selecting_on_a_score_the_model_does_not_report_says_so(tmp_path):
+    """The product objective has no q, so the native product cannot select it."""
+    scores = {"v": torch.tensor([0.5]), "p": torch.tensor([0.2])}
+    trainer = _trainer("esmm_logged_pctr", "ctcvr_prauc", tmp_path)
+
+    with pytest.raises(ValueError, match="needs the 'q' score"):
+        trainer._selection_inputs(scores, torch.tensor([1.0]), torch.tensor([1.0]))
 
 
 # --- evaluate_esmm's optional logged CTCVR ---
@@ -232,7 +262,11 @@ def test_evaluate_esmm_refuses_logged_ctcvr_without_p():
 
 def _real_block():
     with open(os.path.join(CODE_DIR, "configs", "esmm.yaml")) as f:
-        return yaml.safe_load(f)["logged_pctr"]
+        block = yaml.safe_load(f)["logged_pctr"]
+    # Exercise the loader independently of which splits the model consumes.
+    folder = os.path.dirname(block["predictions"]["test"])
+    block["predictions"] = {s: os.path.join(folder, f"{s}.parquet") for s in ("train", "val", "test")}
+    return block
 
 
 def _real_split(split, device):

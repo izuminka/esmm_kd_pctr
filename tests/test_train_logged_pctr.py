@@ -2,7 +2,7 @@
 
 A small DCN is trained first and becomes the logged pCTR source. ESMM-based
 runs then point at it: the logged-pCTR arms (kd and product), and the plain
-ESMM control selected on each CTCVR product. Each run must train, record
+ESMM controls selected on the native CTCVR product. Each run must train, record
 exactly which DCN files it used, and report CTCVR on the logged product.
 """
 
@@ -72,17 +72,30 @@ def logged_runs(encoded, tmp_path_factory):
         "esmm_logged_pctr_product": ("esmm_logged_pctr", "logged_ctcvr_prauc", False,
                                      {**esmm_params, "objective": "product"}),
         "esmm_native_select": ("esmm", "ctcvr_prauc", True, esmm_params),
-        "esmm_logged_select": ("esmm", "logged_ctcvr_prauc", False, {**esmm_params, "aux_weight": 2.0}),
+        "esmm_native_2x": ("esmm", "ctcvr_prauc", False, {**esmm_params, "aux_weight": 2.0}),
     }
     folders = {"dcn": dcn_run}
     for name, (model, metric, save_predictions, params) in arms.items():
         path = _write(tmp, name, {"model": model,
                                   "training": _training(artifacts, metric, save_predictions),
-                                  "model_params": params, "logged_pctr": logged_pctr,
+                                  "model_params": params, "logged_pctr": {**logged_pctr, "predictions":
+                                      {s: f for s, f in logged_pctr["predictions"].items()
+                                       if s == "test" or (s == "train" and model == "esmm_logged_pctr")
+                                       or (s == "val" and model == "esmm_logged_pctr")}},
                                   "data": {"encoded_dir": enc_dir}})
         done = _train(path, best_file)
         assert done.returncode == 0, f"{name}: {done.stderr[-3000:]}"
         folders[name] = runs.resolve_run(str(artifacts), name)
+
+    # A cohort run: its train export must carry the cohort's rows, not the whole split.
+    cohort = {"fraction": 0.5, "ranks": 4, "block_size": 32, "seed": 42}
+    path = _write(tmp, "esmm_cohort", {"model": "esmm",
+                                       "training": _training(artifacts, "ctcvr_prauc", True),
+                                       "model_params": esmm_params, "logged_pctr": logged_pctr,
+                                       "data": {"encoded_dir": enc_dir, "train_cohort": cohort}})
+    done = _train(path, best_file)
+    assert done.returncode == 0, f"esmm_cohort: {done.stderr[-3000:]}"
+    folders["esmm_cohort"] = runs.resolve_run(str(artifacts), "esmm_cohort")
 
     # Plain ESMM with the logged CTCVR turned off: no logged_pctr block at all.
     path = _write(tmp, "esmm_no_logged", {"model": "esmm",
@@ -98,7 +111,7 @@ def logged_runs(encoded, tmp_path_factory):
             "arms": arms, "enc_dir": enc_dir}
 
 
-ESMM_RUNS = ["esmm_logged_pctr_kd", "esmm_logged_pctr_product", "esmm_native_select", "esmm_logged_select"]
+ESMM_RUNS = ["esmm_logged_pctr_kd", "esmm_logged_pctr_product", "esmm_native_select", "esmm_native_2x"]
 
 
 @pytest.mark.parametrize("name", ESMM_RUNS)
@@ -122,7 +135,9 @@ def test_every_esmm_run_reports_ctcvr_on_the_logged_product(logged_runs, name):
                 else ["CTR", "CTCVR", "CTCVR-logged", "pCVR"])
 
     for split in SPLITS:
-        assert [r["population"] for r in rows if r["split"] == split] == expected, split
+        assert [r["population"] for r in rows if r["split"] == split] == [
+            p for p in expected if split == "test" or p != "CTCVR-logged"
+            or (split == "val" and logged_runs["arms"][name][0] == "esmm_logged_pctr")], split
     assert set(runs.read_run(run_dir)["test"]) == set(expected)
 
 
@@ -134,15 +149,21 @@ def test_every_output_names_the_dcn_files_used(logged_runs, name):
 
     source = runs.read_run(run_dir)["logged_pctr"]
     assert source["dcn_run"] == block["dcn_run"] and source["run_id"] == dcn_run_id
-    assert {s: f["file"] for s, f in source["files"].items()} == block["predictions"]
+    used = {"train", "test"} if logged_runs["arms"][name][0] == "esmm_logged_pctr" else {"test"}
+    if logged_runs["arms"][name][0] == "esmm_logged_pctr":
+        used.add("val")
+    assert {s: f["file"] for s, f in source["files"].items()} == {s: block["predictions"][s] for s in used}
 
     ckpt = torch.load(os.path.join(run_dir, "best.pt"), weights_only=False)
-    assert ckpt["logged_pctr"]["run_id"] == dcn_run_id
-    assert set(ckpt["logged_pctr"]["files"]) == {"train", "val"}  # test is scored after training
+    if "train" in used:
+        assert ckpt["logged_pctr"]["run_id"] == dcn_run_id
+        assert set(ckpt["logged_pctr"]["files"]) == used - {"test"}
+    else:
+        assert "logged_pctr" not in ckpt  # test scores are loaded after checkpoint selection
 
     with open(os.path.join(run_dir, "metrics.json")) as f:
         logged = [r for r in json.load(f) if r["population"] == "CTCVR-logged"]
-    assert {r["split"]: r["logged_pctr_file"] for r in logged} == block["predictions"]
+    assert {r["split"]: r["logged_pctr_file"] for r in logged} == {s: block["predictions"][s] for s in used - {"train"}}
     assert all(r["logged_pctr_run"] == block["dcn_run"] for r in logged)
 
     with open(logged_runs["best_file"]) as f:
@@ -150,10 +171,15 @@ def test_every_output_names_the_dcn_files_used(logged_runs, name):
 
 
 @pytest.mark.parametrize("name", ESMM_RUNS)
-def test_history_tracks_both_ctcvr_products_per_epoch(logged_runs, name):
+def test_history_tracks_the_prescribed_validation_metrics(logged_runs, name):
     with open(os.path.join(logged_runs["runs"][name], "history.csv"), newline="") as f:
         (row,) = list(csv.DictReader(f))
-    assert float(row["val_ctcvr_logged_prauc"]) >= 0
+    assert any("logged" in c for c in row) == (logged_runs["arms"][name][0] == "esmm_logged_pctr")
+    with open(os.path.join(logged_runs["runs"][name], "metrics.json")) as f:
+        pcvr = next(r for r in json.load(f) if r["split"] == "val" and r["population"] == "pCVR")
+    for metric, column in (("auc", "auc"), ("pr_auc", "prauc"), ("ne", "ne"), ("ce", "ce")):
+        # This small real-data fixture has no validation conversions; AUC is undefined.
+        assert float(row[f"val_pcvr_{column}"]) == pytest.approx(pcvr[metric], nan_ok=True)
     if name == "esmm_logged_pctr_product":
         assert row["val_ctcvr_prauc"] == ""
     else:
@@ -168,7 +194,10 @@ def test_exported_predictions_carry_the_aligned_logged_pctr(logged_runs):
     for name in ("esmm_logged_pctr_kd", "esmm_native_select"):
         for split in SPLITS:
             df = pd.read_parquet(os.path.join(logged_runs["runs"][name], "predictions", f"{split}.parquet"))
-            assert list(df.columns) == ["sample_id", "y", "z", "q", "v", "p"]
+            logged = split == "test" or (split == "val" and name == "esmm_logged_pctr_kd")
+            assert list(df.columns) == ["sample_id", "y", "z", "q", "v"] + (["p"] if logged else [])
+            if not logged:
+                continue
             dcn = pd.read_parquet(os.path.join(dcn_run, "predictions", f"{split}.parquet")).set_index("sample_id")
             assert (df["p"].to_numpy() == dcn.loc[df["sample_id"], "score"].to_numpy()).all(), (name, split)
 
@@ -179,7 +208,7 @@ def test_checkpoint_rebuilds_the_arm(logged_runs):
     assert {k: ckpt["model_params"][k] for k in ("objective", "alpha", "aux_weight")} == {
         "objective": "kd", "alpha": 0.5, "aux_weight": 2.0}
 
-    esmm = torch.load(os.path.join(logged_runs["runs"]["esmm_logged_select"], "best.pt"), weights_only=False)
+    esmm = torch.load(os.path.join(logged_runs["runs"]["esmm_native_2x"], "best.pt"), weights_only=False)
     assert esmm["model_type"] == "esmm" and esmm["model_params"]["aux_weight"] == 2.0
 
 
@@ -192,24 +221,28 @@ def test_plain_esmm_with_logged_ctcvr_off_reports_no_logged_product(logged_runs)
     for split in SPLITS:
         assert [r["population"] for r in rows if r["split"] == split] == ["CTR", "CTCVR", "pCVR"]
     with open(os.path.join(run_dir, "history.csv"), newline="") as f:
-        assert csv.DictReader(f).fieldnames == ["epoch", "loss", "val_score", "seconds", "saved",
-                                                "val_ctcvr_prauc"]
+        columns = csv.DictReader(f).fieldnames
+        assert not any("logged" in c for c in columns)
+        assert {f"val_{pop}_{metric}" for pop in ("ctr", "ctcvr", "pcvr")
+                for metric in ("auc", "prauc", "ne", "ce")} <= set(columns)
     for split in SPLITS:
         df = pd.read_parquet(os.path.join(run_dir, "predictions", f"{split}.parquet"))
         assert list(df.columns) == ["sample_id", "y", "z", "q", "v"]
     assert "logged_pctr" not in torch.load(os.path.join(run_dir, "best.pt"), weights_only=False)
 
 
-def test_selecting_on_the_logged_product_with_logged_ctcvr_off_is_refused(logged_runs):
+@pytest.mark.parametrize("is_logged_ctcvr", [False, True])
+def test_native_selection_on_the_logged_product_is_refused(logged_runs, is_logged_ctcvr):
     tmp = logged_runs["tmp"]
-    cfg = yaml.safe_load(open(tmp / "configs" / "esmm_logged_select.yaml"))
-    cfg["evaluation"] = {"is_logged_ctcvr": False}
+    cfg = yaml.safe_load(open(tmp / "configs" / "esmm_native_2x.yaml"))
+    cfg["evaluation"] = {"is_logged_ctcvr": is_logged_ctcvr}
+    cfg["training"]["checkpoint_metric"] = "logged_ctcvr_prauc"
     path = _write(tmp, "esmm_off_but_logged_select", cfg)
 
     done = _train(path, logged_runs["best_file"])
 
     assert done.returncode != 0
-    assert "logged_ctcvr_prauc needs evaluation.is_logged_ctcvr on" in done.stderr
+    assert "native ESMM validates on q*v" in done.stderr
 
 
 def test_an_esmm_config_without_a_logged_pctr_source_is_refused(logged_runs):
@@ -223,3 +256,74 @@ def test_an_esmm_config_without_a_logged_pctr_source_is_refused(logged_runs):
     assert done.returncode != 0
     assert "needs a logged_pctr block" in done.stderr
     assert not os.path.exists(os.path.join(cfg["training"]["out_dir"], "esmm_no_source"))
+
+
+# --- regressions ---
+
+
+def test_predict_uses_the_runs_own_logged_pctr_setting(logged_runs):
+    """A run trained without logged pCTR is re-scored without it, whatever today's config says."""
+    run_dir = logged_runs["runs"]["esmm_no_logged"]
+    logged_config = logged_runs["tmp"] / "configs" / "esmm_native_select.yaml"  # wants p
+
+    done = subprocess.run([sys.executable, os.path.join(CODE_DIR, "scripts", "predict_encoded.py"),
+                           "--config", str(logged_config), "--split", "val", "--run-dir", run_dir],
+                          cwd=CODE_DIR, capture_output=True, text=True, timeout=900)
+
+    assert done.returncode == 0, done.stderr[-3000:]
+    df = pd.read_parquet(os.path.join(run_dir, "predictions", "val.parquet"))
+    assert list(df.columns) == ["sample_id", "y", "z", "q", "v"]
+
+
+def test_predict_exports_the_cohort_rows_of_a_cohort_run(logged_runs):
+    run_dir = logged_runs["runs"]["esmm_cohort"]
+    n_cohort = runs.read_run(run_dir)["train_cohort"]["n_rows"]
+    n_full = runs.read_run(run_dir)["data"]["train"]["n_rows"]
+    assert n_cohort < n_full
+
+    done = subprocess.run([sys.executable, os.path.join(CODE_DIR, "scripts", "predict_encoded.py"),
+                           "--config", str(logged_runs["tmp"] / "configs" / "esmm_cohort.yaml"),
+                           "--split", "train", "--run-dir", run_dir],
+                          cwd=CODE_DIR, capture_output=True, text=True, timeout=900)
+
+    assert done.returncode == 0, done.stderr[-3000:]
+    df = pd.read_parquet(os.path.join(run_dir, "predictions", "train.parquet"))
+    assert len(df) == n_cohort, "the full split overwrote the cohort's train predictions"
+
+
+@pytest.mark.parametrize("name", ["esmm_logged_pctr_kd", "esmm_no_logged"])
+def test_report_metrics_resolves_a_run_by_config_name(logged_runs, name):
+    """Run folders are keyed by config name, and the model comes from the run itself."""
+    artifacts = os.path.dirname(os.path.dirname(logged_runs["runs"][name]))
+
+    done = subprocess.run([sys.executable, os.path.join(CODE_DIR, "scripts", "report_metrics.py"),
+                           "--artifacts", artifacts, "--name", name],
+                          cwd=CODE_DIR, capture_output=True, text=True, timeout=900)
+
+    assert done.returncode == 0, done.stderr[-3000:]
+    assert f"artifacts/{name}" in done.stdout or name in done.stdout
+    with open(os.path.join(logged_runs["runs"][name], "metrics.json")) as f:
+        populations = {r["population"] for r in json.load(f)}
+    assert ("CTCVR-logged" in populations) == (name != "esmm_no_logged")
+
+
+def test_report_metrics_needs_a_run_to_read():
+    done = subprocess.run([sys.executable, os.path.join(CODE_DIR, "scripts", "report_metrics.py")],
+                          cwd=CODE_DIR, capture_output=True, text=True, timeout=900)
+    assert done.returncode != 0 and "--run-dir" in done.stderr
+
+
+def test_a_finished_run_stays_finished_when_the_bookkeeping_fails(logged_runs, tmp_path):
+    """The best-models path is a directory here, so recording the result raises."""
+    cfg_path = logged_runs["tmp"] / "configs" / "esmm_no_logged.yaml"
+    cfg = yaml.safe_load(open(cfg_path))
+    artifacts = cfg["training"]["out_dir"]
+    blocked = tmp_path / "best_models.yaml"
+    blocked.mkdir()
+
+    done = _train(cfg_path, str(blocked))
+
+    assert done.returncode != 0
+    run_dir = runs.resolve_run(artifacts, "esmm_no_logged")  # only finished runs are latest
+    run = runs.read_run(run_dir)
+    assert run["status"] == runs.FINISHED and "IsADirectoryError" in run["error"]

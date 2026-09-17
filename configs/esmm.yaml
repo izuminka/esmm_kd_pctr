@@ -1,7 +1,7 @@
 model: esmm
 
 training:
-  epochs: 5           # paper caps training at five epochs
+  epochs: 5           # common cap; each arm retains its best validation checkpoint
   batch_size: 65536   # paper's global batch (4 replicas x 16,384); here one GPU
   eval_batch_size: 65536  # eval runs under no_grad, so it fits a bigger batch
   lr: 0.001           # paper's ESMM learning rate
@@ -10,8 +10,8 @@ training:
   shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
                          # rows together, which on user-ordered data collapses
                          # a batch to a few hundred distinct users
-  checkpoint_metric: ctcvr_prauc  # paper: full/half keep the best validation
-                                  # native CTCVR (q*v) PR-AUC
+  checkpoint_metric: ctcvr_prauc  # native q*v on the complete validation split
+  keep_checkpoint: best  # same validation selection rule for full, half and quarter
   save_predictions: false  # score train/val/test in memory; write metrics only
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
   load_test: false    # test + its common table are ~17 GB; holding them beside
@@ -19,7 +19,8 @@ training:
                       # scripts/predict_encoded.py exports test afterwards.
   out_dir: artifacts  # relative to project root (parent of code/)
   early_stopping:
-    patience: 2       # paper: patience two, zero minimum delta
+    enabled: true
+    patience: 2       # stop after two epochs without validation improvement
     min_delta: 0.0
 
 model_params:
@@ -27,18 +28,16 @@ model_params:
   tower_dims: [460, 360, 200, 80, 2]
   aux_weight: 1.0  # weight on the CTR term; 1 is the canonical ESMM loss
 
-# Frozen DCN-V2 pCTR p, used only to report CTCVR-logged (p * v) beside CTCVR (q * v);
-# it is not a model input and not in this model's loss.
+# Frozen DCN-V2 pCTR p, used only for the test CTCVR-logged (p*v) report.
+# It is not used for training, validation or checkpoint selection.
 logged_pctr:
   dcn_run: artifacts/dcn/20260916T232126Z  # the dcn entry in best_models.yaml
-  predictions:  # one file per split, inside dcn_run; joined to rows by sample_id
-    train: artifacts/dcn/20260916T232126Z/predictions/train.parquet
-    val: artifacts/dcn/20260916T232126Z/predictions/val.parquet
+  predictions:  # only required splits; joined by sample_id
     test: artifacts/dcn/20260916T232126Z/predictions/test.parquet
   score_column: score
 
 evaluation:
-  is_logged_ctcvr: true  # also report CTCVR-logged (p * v) beside CTCVR (q * v)
+  is_logged_ctcvr: true  # report p*v only on test; never select on it
 
 data:
   # paths relative to project root

@@ -11,8 +11,7 @@ training:
   shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
                          # rows together, which on user-ordered data collapses
                          # a batch to a few hundred distinct users
-  checkpoint_metric: ctcvr_prauc  # paper: full/half keep the best validation
-                                  # native CTCVR (q*v) PR-AUC
+  checkpoint_metric: ctcvr_prauc  # native q*v on the complete validation split
   save_predictions: false  # score train/val/test in memory; write metrics only
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
   load_test: false    # test + its common table are ~17 GB; holding them beside

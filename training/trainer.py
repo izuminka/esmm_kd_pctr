@@ -63,8 +63,9 @@ def _to_device(encoded: dict, device: torch.device) -> dict:
     return {k: tuple(t.to(device, non_blocking=True) for t in v) for k, v in encoded.items()}
 
 
-# Validation PR-AUC of each CTCVR product, logged per epoch for ESMM models.
-_ESMM_HISTORY_COLUMNS = ("val_ctcvr_prauc", "val_ctcvr_logged_prauc")
+# Use the same population names and metrics as the final split reports.
+_HISTORY_POPULATIONS = {"CTR": "ctr", "CTCVR": "ctcvr", "CTCVR-logged": "ctcvr_logged", "pCVR": "pcvr"}
+_HISTORY_METRICS = {"auc": "auc", "pr_auc": "prauc", "ne": "ne", "ce": "ce"}
 
 
 # y/z are 0/1 labels; pin them so the schema does not depend on whether the
@@ -137,11 +138,16 @@ class Trainer:
         # not of the architecture: the recipe selects the click-only model on its
         # CTR head and ESMM on its native product.
         self.checkpoint_metric = tr.get("checkpoint_metric", "ctr_prauc")
-        from scripts.report_metrics import ESMM_MODELS  # the population definitions live there
+        # "last" is a fixed-epoch experiment: train the full budget and export
+        # its final weights. "best" may stop early and restores the best score.
+        self.keep_checkpoint = tr.get("keep_checkpoint", "best")
+        if self.keep_checkpoint not in ("best", "last"):
+            raise ValueError(f"keep_checkpoint must be 'best' or 'last', got {self.keep_checkpoint!r}")
+        from scripts.report_metrics import ESMM_MODELS, logged_ctcvr_splits
         self.is_esmm = self.model_name in ESMM_MODELS
-        # ESMM models also score CTCVR on the logged pCTR (p * v) unless the config's
-        # evaluation.is_logged_ctcvr turns it off.
-        self.is_logged_ctcvr = self.is_esmm and cfg.get("evaluation", {}).get("is_logged_ctcvr", True)
+        # Logged-score models validate on p*v; native ESMM only reports it on test.
+        self.logged_ctcvr_splits = logged_ctcvr_splits(cfg)
+        self.is_logged_ctcvr = bool(self.logged_ctcvr_splits)
         # Where the logged pCTR came from (see data.logged_pctr); the caller sets it
         # when a config names one, and it is saved with every checkpoint.
         self.logged_pctr_source = None
@@ -150,6 +156,7 @@ class Trainer:
         self.out_dir = os.path.join(root_dir, tr["out_dir"])
         self.device = resolve_device(tr.get("gpus", -1))
         es = tr.get("early_stopping", {})
+        self.es_enabled = self.keep_checkpoint == "best" and es.get("enabled", True)
         self.es_patience = es.get("patience", 5)
         self.es_min_delta = es.get("min_delta", 1e-4)
 
@@ -169,13 +176,15 @@ class Trainer:
         from training.dataset import NumpyDataset
         use_numpy = isinstance(dataset, NumpyDataset)
 
-        is_logged_pctr_needed = self.is_logged_ctcvr or self.model_name == "esmm_logged_pctr"
-        if is_logged_pctr_needed and not (use_numpy and dataset.train.logged_pctr is not None
-                                          and dataset.val.logged_pctr is not None):
-            raise ValueError(f"{self.model_name} needs logged pCTR on the encoded train and val "
-                             "splits (config logged_pctr), or evaluation.is_logged_ctcvr: false")
-        if self.checkpoint_metric == "logged_ctcvr_prauc" and not self.is_logged_ctcvr:
-            raise ValueError("checkpoint_metric logged_ctcvr_prauc needs evaluation.is_logged_ctcvr on")
+        needed = set(self.logged_ctcvr_splits)
+        if self.model_name == "esmm_logged_pctr":
+            needed.add("train")
+        for split_name in needed:
+            split = getattr(dataset, split_name)
+            if split is not None and not (use_numpy and split.logged_pctr is not None):
+                raise ValueError(f"{self.model_name} needs logged pCTR on the encoded {split_name} split")
+        if self.checkpoint_metric == "logged_ctcvr_prauc" and "val" not in self.logged_ctcvr_splits:
+            raise ValueError("validation p*v requires esmm_logged_pctr; native ESMM validates on q*v")
 
         random.seed(self.seed)
         os.makedirs(self.out_dir, exist_ok=True)
@@ -185,7 +194,12 @@ class Trainer:
         optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
         checkpoint_path = os.path.join(self.out_dir, "best.pt")
         history_path = os.path.join(self.out_dir, "history.csv")
-        history_extras = _ESMM_HISTORY_COLUMNS[:2 if self.is_logged_ctcvr else 1] if self.is_esmm else ()
+        history_extras = tuple(
+            f"val_{population}_{metric}"
+            for name, population in _HISTORY_POPULATIONS.items()
+            if name != "CTCVR-logged" or "val" in self.logged_ctcvr_splits
+            for metric in _HISTORY_METRICS.values()
+        ) if self.is_esmm else ()
         with open(history_path, "w", newline="") as f:
             csv.writer(f).writerow(["epoch", "loss", "val_score", "seconds", "saved", *history_extras])
 
@@ -202,9 +216,9 @@ class Trainer:
 
 
         logger.info(
-            "Training %s | %d epochs | batch=%d | lr=%s | device=%s | early_stopping(patience=%d, min_delta=%s)",
+            "Training %s | %d epochs | batch=%d | lr=%s | device=%s | checkpoint=%s | early_stopping(enabled=%s, patience=%d, min_delta=%s)",
             self.model_name, self.epochs, self.batch_size, self.lr, self.device,
-            self.es_patience, self.es_min_delta,
+            self.keep_checkpoint, self.es_enabled, self.es_patience, self.es_min_delta,
         )
 
         best_score = -float("inf")
@@ -227,14 +241,14 @@ class Trainer:
                 epoch, self.epochs, loss, score, epoch_secs,
                 "  ".join(f"{k}={v:.6f}" for k, v in extras.items()),
             )
-            saved = score > best_score + self.es_min_delta
+            improved = score > best_score + self.es_min_delta
+            # Last mode saves every epoch and always runs the full epoch budget.
+            saved = improved or self.keep_checkpoint == "last"
             # Appended per epoch so a run that dies mid-training keeps its history.
             with open(history_path, "a", newline="") as f:
                 csv.writer(f).writerow([epoch, loss, score, round(epoch_secs, 1), saved,
                                         *(extras.get(c, "") for c in history_extras)])
             if saved:
-                best_score = score
-                no_improve = 0
                 ckpt_data = {
                     "model_type": self.model_name,
                     "model_state_dict": model.state_dict(),
@@ -256,14 +270,22 @@ class Trainer:
                     ckpt_data["logged_pctr"] = self.logged_pctr_source
                 torch.save(ckpt_data, checkpoint_path)
                 logger.info("  -> checkpoint saved (val_score=%.4f)", score)
+
+            if improved:
+                best_score = score
+                no_improve = 0
             else:
                 no_improve += 1
-                logger.info("  no improvement (%d/%d)", no_improve, self.es_patience)
-                if no_improve >= self.es_patience:
+                if self.es_enabled:
+                    logger.info("  no improvement (%d/%d)", no_improve, self.es_patience)
+                else:
+                    logger.info("  no improvement; early stopping disabled")
+                if self.es_enabled and no_improve >= self.es_patience:
                     logger.info("Early stopping triggered after %d epochs with no improvement.", self.es_patience)
                     break
 
-        logger.info("Best val score: %.4f. Loading best checkpoint for export...", best_score)
+        logger.info("Best val score: %.4f. Loading the %s checkpoint for export...",
+                    best_score, "last" if self.keep_checkpoint == "last" else "best")
         ckpt = torch.load(checkpoint_path, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
 
@@ -275,7 +297,7 @@ class Trainer:
                     logger.info("  %s: not loaded, skipping", split_name)
                     continue
                 t0 = time.perf_counter()
-                ids, ys, zs, scores = self._predict_numpy(model, split_data)
+                ids, ys, zs, scores = self._predict_numpy(model, split_data, split_name=split_name)
                 path = write_split(self.out_dir, split_name, self.model_name,
                                    ids, ys, zs, scores, self.save_predictions)
                 logger.info("  %s: %d rows -> %s (%.1fs)", split_name, len(ids), path, time.perf_counter() - t0)
@@ -426,34 +448,55 @@ class Trainer:
         loss.backward()
         return loss.item()
 
-    def _batch_scores(self, model, split_data, idx, enc) -> dict:
+    def _batch_scores(
+        self,
+        model,       # the model being scored
+        split_data,  # the split the rows come from, carrying any logged pCTR
+        idx,         # row indices of this batch within that split
+        enc,         # those rows' encoded features
+        split_name: str,
+    ) -> dict:
         """Named prediction columns for one encoded batch of rows `idx`.
 
         A single-head model reports one score; ESMM reports its two heads
         separately, leaving any product to the consumer, so that a head can be
         scored on its own population as well as inside a product. An ESMM with no
-        auxiliary CTR head has no q. Unless evaluation.is_logged_ctcvr is off, the
-        split's logged pCTR is reported as p beside the heads.
+        auxiliary CTR head has no q. Logged pCTR is included only for test
+        reporting and logged-model validation, never for train reports.
         """
         if self.is_esmm:
             q, v = model(enc)
             scores = {"v": v} if q is None else {"q": q, "v": v}
-            if self.is_logged_ctcvr:
+            if split_name in self.logged_ctcvr_splits:
                 scores["p"] = split_data.logged_pctr[idx]
             return scores
         return {"score": torch.sigmoid(model(enc))}
 
-    def _selection_inputs(self, scores: dict, y, z) -> tuple:
+    def _selection_inputs(
+        self,
+        scores: dict,  # prediction columns for the validation split
+        y,             # click label
+        z,             # conversion label; y*z is the CTCVR label
+    ) -> tuple:
         """(score, label) pair the configured checkpoint metric is computed on."""
+        def column(name):
+            if name not in scores:
+                # e.g. selecting on the native product with no auxiliary CTR head.
+                raise ValueError(f"checkpoint_metric {self.checkpoint_metric!r} needs the {name!r} "
+                                 f"score; this model reports {sorted(scores)}")
+            return scores[name]
+
         if self.checkpoint_metric == "ctr_prauc":
-            return (scores["q"] if self.is_esmm else scores["score"]), y
+            return column("q" if self.is_esmm else "score"), y
         if self.checkpoint_metric == "ctcvr_prauc":
-            return scores["q"] * scores["v"], y * z
+            return column("q") * column("v"), y * z
         if self.checkpoint_metric == "logged_ctcvr_prauc":
-            return scores["p"] * scores["v"], y * z
+            if "val" not in self.logged_ctcvr_splits:
+                raise ValueError("validation p*v requires esmm_logged_pctr; native ESMM validates on q*v")
+            return column("p") * column("v"), y * z
         raise ValueError(f"Unknown checkpoint_metric: {self.checkpoint_metric!r}")
 
-    def _predict_numpy(self, model, split_data) -> tuple:
+    def _predict_numpy(self, model, split_data, *, split_name: str) -> tuple:
         """Return (sample_ids, ys, zs, scores) from a SplitData, as numpy arrays.
 
         `scores` is the column -> array mapping `save_scores` writes out.
@@ -470,7 +513,7 @@ class Trainer:
                 ids_out.append(split_data.sample_ids[idx].cpu())
                 ys_out.append(y.cpu())
                 zs_out.append(z.cpu())
-                for column, score in self._batch_scores(model, split_data, idx, enc).items():
+                for column, score in self._batch_scores(model, split_data, idx, enc, split_name).items():
                     scores_out.setdefault(column, []).append(score.cpu())
         return (
             torch.cat(ids_out).numpy(),
@@ -480,13 +523,7 @@ class Trainer:
         )
 
     def _val_score_numpy(self, model, val_split) -> tuple[float, dict]:
-        """The validation checkpoint metric, plus both CTCVR PR-AUCs for an ESMM model.
-
-        Batched to bound activation memory. PR-AUC, not AUC: on these positive
-        rates it separates models that ROC-AUC ranks almost equally. The extras
-        (q*v and logged p*v) are recorded whichever one selects, so the two
-        products can be followed over training; one missing its q or p is omitted.
-        """
+        """Score the complete validation population with the final-report evaluator."""
         from evaluation.metrics import pr_auc
         model.eval()
         columns, ys, zs = {}, [], []
@@ -497,7 +534,7 @@ class Trainer:
                 idx = torch.arange(start, min(start + eval_batch, n),
                                    device=val_split.device)
                 enc, y, z = val_split.get_batch(idx)
-                for column, score in self._batch_scores(model, val_split, idx, enc).items():
+                for column, score in self._batch_scores(model, val_split, idx, enc, "val").items():
                     columns.setdefault(column, []).append(score.cpu())
                 ys.append(y.cpu())
                 zs.append(z.cpu())
@@ -507,11 +544,12 @@ class Trainer:
         score, label = self._selection_inputs(scores, y, z)
         extras = {}
         if self.is_esmm:
-            ctcvr_label = (y * z).numpy()
-            if "q" in scores:
-                extras["val_ctcvr_prauc"] = pr_auc((scores["q"] * scores["v"]).numpy(), ctcvr_label)
-            if "p" in scores:
-                extras["val_ctcvr_logged_prauc"] = pr_auc((scores["p"] * scores["v"]).numpy(), ctcvr_label)
+            from scripts.report_metrics import metric_rows
+            rows = metric_rows("val", self.model_name, y.numpy().astype(_LABEL_DTYPES["y"]),
+                               z.numpy().astype(_LABEL_DTYPES["z"]),
+                               {c: s.numpy() for c, s in scores.items()})
+            extras = {f"val_{_HISTORY_POPULATIONS[row['population']]}_{suffix}": row[metric]
+                      for row in rows for metric, suffix in _HISTORY_METRICS.items()}
         return pr_auc(score.numpy(), label.numpy()), extras
 
     # ------------------------------------------------------------------

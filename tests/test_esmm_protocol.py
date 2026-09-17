@@ -127,7 +127,7 @@ def test_native_fit_with_loaded_test_needs_only_test_logged_scores(tmp_path):
         assert any(r["population"] == "CTCVR-logged" for r in rows) == (split == "test")
 
 
-@pytest.mark.parametrize("metric", ["ctcvr_prauc", "pcvr_ne"])
+@pytest.mark.parametrize("metric", ["ctcvr_prauc", "pcvr_ne", "ctr_ne"])
 @pytest.mark.parametrize("keep,enabled,expected_epochs,expected_kept", [
     ("best", True, 4, 2), ("best", False, 5, 2),
     ("last", True, 5, 5), ("last", False, 5, 5), ("last", None, 5, 5),
@@ -146,7 +146,8 @@ def test_stopping_restores_the_selected_weights(tmp_path, monkeypatch, keep, ena
     data = NumpyDataset(TinySplit(), TinySplit(), None, {"f": {str(i): i for i in range(1, 9)}}, ["f"])
     model = build_model(cfg, data.vocab_sizes)
     trainer = Trainer(cfg, str(tmp_path))
-    scores = iter([1.1, .8, .9, 1.0, 1.2] if metric == "pcvr_ne" else [.1, .2, .15, .14, .13])
+    scores = iter([1.1, .8, .9, 1.0, 1.2] if metric.endswith("_ne")
+                  else [.1, .2, .15, .14, .13])
 
     def train_epoch(model, split, optimizer, epoch):
         with torch.no_grad():

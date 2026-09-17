@@ -1,9 +1,8 @@
 model: dcn
 
 training:
-  # Values below follow the DCN-V2 pCTR recipe in
-  # paper/frozen_pctr_iclr2027.tex (appendix "Ali-CCP Reproduction Recipes").
-  epochs: 5           # paper caps training at five epochs
+  # Frozen after validation-only tuning against the ESMM CTR tower.
+  epochs: 5           # matched ESMM budget; always run all five epochs
   batch_size: 65536   # paper's global batch (4 replicas x 16,384); here one GPU
   eval_batch_size: 65536  # eval runs under no_grad, so it fits a bigger batch
   lr: 0.0005
@@ -12,7 +11,8 @@ training:
   shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
                          # rows together, which on user-ordered data collapses
                          # a batch to a few hundred distinct users
-  checkpoint_metric: ctr_prauc  # paper: keep the best validation CTR PR-AUC
+  checkpoint_metric: ctr_ne  # minimize CTR NE on the complete validation split
+  keep_checkpoint: best
   save_predictions: true   # its scores are the frozen logged pCTR p_i the ESMM
                            # logged-pCTR arms consume
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
@@ -21,15 +21,21 @@ training:
                       # scripts/predict_encoded.py exports test afterwards.
   out_dir: artifacts  # relative to project root (parent of code/)
   early_stopping:
+    enabled: false     # evaluate all five epochs, then restore minimum CTR NE
     patience: 2       # paper: patience two, zero minimum delta
     min_delta: 0.0
 
 model_params:
-  emb_dim: 64
-  cross_rank: 256
+  # Match ESMM's embedding capacity, then add explicit DCN-V2 crosses.  Per-field
+  # weighted means keep the history bags stable; bounded bag statistics retain
+  # their token-count and weight-mass information.
+  emb_dim: 20
+  cross_rank: 128
   num_cross_layers: 4
-  deep_hidden_dims: [2048, 1024, 512]
+  deep_hidden_dims: [512, 256, 128]
   dropout: 0.1
+  pooling: mean
+  bag_stats: true
 
 data:
   # paths relative to project root

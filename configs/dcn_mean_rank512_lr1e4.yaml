@@ -1,0 +1,36 @@
+model: dcn
+
+training:
+  # Validation-only tuning candidate: retain the DCN-V2 weighted-mean input,
+  # increase cross rank above input_dim/4, and slow the update that overfit at
+  # 5e-4.  All other data and training protocol choices match dcn_mean.yaml.
+  epochs: 5
+  batch_size: 65536
+  eval_batch_size: 65536
+  lr: 0.0001
+  grad_clip_norm: 10
+  seed: 42
+  shuffle_block_size: 1
+  checkpoint_metric: ctr_ne
+  keep_checkpoint: best
+  save_predictions: true
+  evaluate_test: false
+  gpus: -1
+  load_test: false
+  out_dir: artifacts
+  early_stopping:
+    enabled: false
+    patience: 2
+    min_delta: 0.0
+
+model_params:
+  emb_dim: 64
+  cross_rank: 512
+  num_cross_layers: 4
+  deep_hidden_dims: [2048, 1024, 512]
+  dropout: 0.1
+  pooling: mean
+
+data:
+  csv_dir: ali-ccp/extracted
+  encoded_dir: ali-ccp/encoded

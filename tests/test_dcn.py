@@ -54,6 +54,76 @@ def test_pooling_is_weighted_mean_not_sum():
     assert torch.allclose(out, torch.tensor([[2.8, 28.0]]))
 
 
+def test_model_sum_pooling_preserves_raw_weight_magnitude():
+    model = DCNv2({"f": 2}, emb_dim=1, cross_rank=1, num_cross_layers=0,
+                  deep_hidden_dims=(), dropout=0, pooling="sum")
+    with torch.no_grad():
+        model.embeddings["f"].weight.copy_(torch.tensor([[0.0], [2.0], [3.0]]))
+        model.head.weight.copy_(torch.tensor([[1.0, 0.0]]))
+        model.head.bias.zero_()
+    batch = {"f": (torch.tensor([1, 2]), torch.tensor([0.5, 2.0]), torch.tensor([0]))}
+    assert torch.allclose(model(batch), torch.tensor([7.0]))
+
+
+def test_invalid_pooling_is_rejected():
+    with pytest.raises(ValueError, match="pooling"):
+        DCNv2({"f": 2}, pooling="max")
+
+
+def test_bag_stats_retain_bounded_count_and_weight_magnitude():
+    model = DCNv2({"f": 3}, emb_dim=1, cross_rank=1, num_cross_layers=0,
+                  deep_hidden_dims=(), dropout=0, pooling="mean", bag_stats=True)
+    with torch.no_grad():
+        model.embeddings["f"].weight.copy_(torch.tensor([[0.0], [2.0], [4.0], [8.0]]))
+        # With an empty deep branch the head receives u0 twice; read only the
+        # two statistics from the cross-branch copy.
+        model.head.weight.copy_(torch.tensor([[0.0, 1.0, 1.0, 0.0, 0.0, 0.0]]))
+        model.head.bias.zero_()
+    batch = {"f": (torch.tensor([1, 2, 3]), torch.tensor([1.0, 3.0, 4.0]),
+                   torch.tensor([0, 2]))}
+    expected = torch.tensor([
+        (torch.log1p(torch.tensor(2.0)) + torch.log1p(torch.tensor(4.0))) / 8.0,
+        (torch.log1p(torch.tensor(1.0)) + torch.log1p(torch.tensor(4.0))) / 8.0,
+    ])
+    assert torch.allclose(model(batch), expected)
+
+
+def test_bag_stats_require_mean_pooling():
+    with pytest.raises(ValueError, match="bag_stats"):
+        DCNv2({"f": 2}, pooling="sum", bag_stats=True)
+
+
+def test_l2_pooling_normalizes_weight_mass_across_fields():
+    model = DCNv2({"a": 2, "b": 1}, emb_dim=1, cross_rank=1, num_cross_layers=0,
+                  deep_hidden_dims=(), dropout=0, pooling="l2")
+    with torch.no_grad():
+        model.embeddings["a"].weight.fill_(1.0)
+        model.embeddings["b"].weight.fill_(1.0)
+        # Empty deep branch repeats u0; read only its cross-branch copy.
+        model.head.weight.copy_(torch.tensor([[1.0, 1.0, 0.0, 0.0]]))
+        model.head.bias.zero_()
+    batch = {
+        "a": (torch.tensor([1, 2]), torch.tensor([3.0, 4.0]), torch.tensor([0])),
+        "b": (torch.tensor([1]), torch.tensor([12.0]), torch.tensor([0])),
+    }
+    assert torch.allclose(model(batch), torch.tensor([(3.0 + 4.0 + 12.0) / 13.0]))
+
+
+def test_xavier_cross_initialization_matches_linear_projection_shapes():
+    model = DCNv2({str(i): 9 for i in range(23)}, emb_dim=20, cross_rank=128,
+                  num_cross_layers=1, deep_hidden_dims=(128,),
+                  cross_init="xavier", head_init="xavier")
+    layer = model.cross_layers[0]
+    assert layer.v.weight.var().item() == pytest.approx(2 / (460 + 128), rel=0.1)
+    assert layer.u.weight.var().item() == pytest.approx(2 / (128 + 460), rel=0.1)
+    assert model.head.weight.var().item() == pytest.approx(2 / (588 + 1), rel=0.15)
+
+
+def test_invalid_token_dropout_is_rejected():
+    with pytest.raises(ValueError, match="token_dropout"):
+        DCNv2({"f": 2}, token_dropout=1.0)
+
+
 # --- cross layer ---
 
 

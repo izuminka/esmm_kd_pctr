@@ -131,6 +131,7 @@ class Trainer:
         self.batch_size = tr["batch_size"]
         self.eval_batch_size = tr["eval_batch_size"]
         self.lr = tr["lr"]
+        self.weight_decay = tr.get("weight_decay", 0.0)
         self.seed = tr.get("seed", 42)
         self.grad_clip_norm = tr["grad_clip_norm"]
         self.shuffle_block_size = tr["shuffle_block_size"]
@@ -171,7 +172,7 @@ class Trainer:
         or the legacy Dataset (list-of-Impression).
 
         Legacy datasets use metric_fn(model, encoded_val, val_y), with val_z
-        as a fourth argument for ESMM. Lower is better for pcvr_ne; other
+        as a fourth argument for ESMM. NE metrics are minimized; other
         checkpoint metrics are maximized.
         Returns the path of the saved checkpoint.
         """
@@ -193,7 +194,9 @@ class Trainer:
 
         device = self.device
         model = model.to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
         checkpoint_path = os.path.join(self.out_dir, "best.pt")
         history_path = os.path.join(self.out_dir, "history.csv")
         history_extras = tuple(
@@ -223,7 +226,8 @@ class Trainer:
             self.keep_checkpoint, self.es_enabled, self.es_patience, self.es_min_delta,
         )
 
-        best_score = float("inf") if self.checkpoint_metric == "pcvr_ne" else -float("inf")
+        minimize = self.checkpoint_metric.endswith("_ne")
+        best_score = float("inf") if minimize else -float("inf")
         no_improve = 0
         for epoch in range(1, self.epochs + 1):
             t0 = time.perf_counter()
@@ -247,7 +251,7 @@ class Trainer:
                 epoch, self.epochs, loss, score, epoch_secs,
                 "  ".join(f"{k}={v:.6f}" for k, v in extras.items()),
             )
-            improved = (score < best_score - self.es_min_delta if self.checkpoint_metric == "pcvr_ne"
+            improved = (score < best_score - self.es_min_delta if minimize
                         else score > best_score + self.es_min_delta)
             # Last mode saves every epoch and always runs the full epoch budget.
             saved = improved or self.keep_checkpoint == "last"
@@ -496,7 +500,7 @@ class Trainer:
         if self.checkpoint_metric == "pcvr_ne":
             clicked = y == 1
             return column("v")[clicked], z[clicked]
-        if self.checkpoint_metric == "ctr_prauc":
+        if self.checkpoint_metric in ("ctr_ne", "ctr_prauc"):
             return column("q" if self.is_esmm else "score"), y
         if self.checkpoint_metric == "ctcvr_prauc":
             return column("q") * column("v"), y * z
@@ -534,7 +538,7 @@ class Trainer:
 
     def _val_score_numpy(self, model, val_split) -> tuple[float, dict]:
         """Score the complete validation population with the final-report evaluator."""
-        from evaluation.metrics import pr_auc
+        from evaluation.metrics import normalized_entropy, pr_auc
         model.eval()
         columns, ys, zs = {}, [], []
         eval_batch = self.eval_batch_size
@@ -562,6 +566,8 @@ class Trainer:
                       for row in rows for metric, suffix in _HISTORY_METRICS.items()}
         if self.checkpoint_metric == "pcvr_ne":
             return extras["val_pcvr_ne"], extras
+        if self.checkpoint_metric == "ctr_ne":
+            return normalized_entropy(score.numpy(), label.numpy()), extras
         return pr_auc(score.numpy(), label.numpy()), extras
 
     # ------------------------------------------------------------------

@@ -1,13 +1,14 @@
 """DCN-V2 pCTR: a separate click-only model (not ESMM's auxiliary CTR tower).
 
 Architecture and init match the paper's Ali-CCP recipe:
-  - one EmbeddingBag per categorical field, width emb_dim, weighted-MEAN pooling
-    (weights normalized to sum to 1 per bag, 0 if the bag's total weight is 0)
+  - one EmbeddingBag per categorical field, width emb_dim, with configurable
+    weighted-sum, weighted-mean, or sample-L2-normalized pooling
+  - optional bounded log bag-count and log weight-mass features
   - num_cross_layers rank-cross_rank low-rank cross layers over the pooled input
   - a deep branch: cross_dim -> deep_hidden_dims..., ReLU + Dropout(dropout) per hidden layer
   - concat(cross output, deep output) -> one logit -> raw sigmoid, no calibration
-  - embeddings ~ U(-1/sqrt(K_f), 1/sqrt(K_f)); every dense kernel He-normal
-    (zero-mean, variance 2/fan_in), every dense bias zero
+  - embeddings ~ U(-1/sqrt(K_f), 1/sqrt(K_f)); configurable He/Xavier cross
+    and head initialization; ReLU deep layers use He-normal; biases are zero
 
 Loss: single-task BCE-with-logits on the click label; no CTCVR term.
 
@@ -41,6 +42,48 @@ def _normalize_weights(weights: torch.Tensor, offsets: torch.Tensor) -> torch.Te
     return weights / safe_sums[bag_ids]
 
 
+def _normalized_weights_and_bounded_stats(
+    weights: torch.Tensor, offsets: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return mean-pooling weights and two stable bag-level numeric features.
+
+    Raw weighted sums can be thousands of times larger for history fields than
+    for singleton fields, which is unsafe inside repeated multiplicative cross
+    layers.  The two bounded features retain that discarded information without
+    exposing the cross network to the raw scale: log token count and log total
+    non-negative weight, each mapped approximately into [0, 1].
+    """
+    num_bags = offsets.numel()
+    total_len = weights.numel()
+    ends = torch.cat([offsets[1:], offsets.new_tensor([total_len])])
+    lengths = ends - offsets
+    bag_ids = torch.repeat_interleave(
+        torch.arange(num_bags, device=offsets.device), lengths
+    )
+    bag_sums = torch.zeros(
+        num_bags, dtype=weights.dtype, device=weights.device
+    ).scatter_add_(0, bag_ids, weights)
+    safe_sums = bag_sums.masked_fill(bag_sums == 0, 1.0)
+    normalized = weights / safe_sums[bag_ids]
+    stats = torch.stack(
+        (
+            (torch.log1p(lengths.to(weights.dtype)) / 8.0).clamp(max=1.0),
+            (torch.log1p(bag_sums.clamp_min(0)) / 8.0).clamp(max=1.0),
+        ),
+        dim=1,
+    )
+    return normalized, stats
+
+
+def _bag_ids(weights: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+    """Map each flattened per-sample weight to its bag (row) index."""
+    ends = torch.cat([offsets[1:], offsets.new_tensor([weights.numel()])])
+    lengths = ends - offsets
+    return torch.repeat_interleave(
+        torch.arange(offsets.numel(), device=offsets.device), lengths
+    )
+
+
 class _CrossLayer(nn.Module):
     """One low-rank DCN-V2 cross layer.
 
@@ -49,12 +92,18 @@ class _CrossLayer(nn.Module):
     layer by layer, starting out equal to `u0` (see `DCNv2.forward`).
     """
 
-    def __init__(self, dim: int, rank: int):
+    def __init__(self, dim: int, rank: int, init: str = "he"):
         super().__init__()
         self.v = nn.Linear(dim, rank, bias=False)
         self.u = nn.Linear(rank, dim, bias=True)
-        nn.init.kaiming_normal_(self.v.weight, nonlinearity="relu")
-        nn.init.kaiming_normal_(self.u.weight, nonlinearity="relu")
+        if init == "he":
+            nn.init.kaiming_normal_(self.v.weight, nonlinearity="relu")
+            nn.init.kaiming_normal_(self.u.weight, nonlinearity="relu")
+        elif init == "xavier":
+            nn.init.xavier_normal_(self.v.weight)
+            nn.init.xavier_normal_(self.u.weight)
+        else:
+            raise ValueError(f"cross_init must be 'he' or 'xavier', got {init!r}")
         nn.init.zeros_(self.u.bias)
 
     def forward(self, u0: torch.Tensor, u_l: torch.Tensor) -> torch.Tensor:
@@ -83,10 +132,24 @@ class DCNv2(nn.Module):
         num_cross_layers: int = 4,
         deep_hidden_dims: tuple = (2048, 1024, 512),
         dropout: float = 0.1,
+        pooling: str = "mean",
+        bag_stats: bool = False,
+        cross_init: str = "he",
+        head_init: str = "he",
+        token_dropout: float = 0.0,
     ):
         super().__init__()
+        if pooling not in ("mean", "sum", "l2"):
+            raise ValueError(f"pooling must be 'mean', 'sum', or 'l2', got {pooling!r}")
+        self.pooling = pooling
+        if bag_stats and pooling != "mean":
+            raise ValueError("bag_stats requires pooling='mean'")
+        self.bag_stats = bag_stats
+        if not 0.0 <= token_dropout < 1.0:
+            raise ValueError(f"token_dropout must be in [0, 1), got {token_dropout}")
+        self.token_dropout = token_dropout
         self.field_ids = sorted(field_vocab_sizes)
-        cross_dim = emb_dim * len(self.field_ids)
+        cross_dim = (emb_dim + (2 if bag_stats else 0)) * len(self.field_ids)
         deep_dims = (cross_dim,) + tuple(deep_hidden_dims)
 
         self.embeddings = nn.ModuleDict()
@@ -97,11 +160,16 @@ class DCNv2(nn.Module):
             self.embeddings[field_id] = bag
 
         self.cross_layers = nn.ModuleList(
-            _CrossLayer(cross_dim, cross_rank) for _ in range(num_cross_layers)
+            _CrossLayer(cross_dim, cross_rank, cross_init) for _ in range(num_cross_layers)
         )
         self.deep = _make_deep_branch(cross_dim, deep_hidden_dims, dropout)
         self.head = nn.Linear(cross_dim + deep_dims[-1], 1)
-        nn.init.kaiming_normal_(self.head.weight, nonlinearity="relu")
+        if head_init == "he":
+            nn.init.kaiming_normal_(self.head.weight, nonlinearity="relu")
+        elif head_init == "xavier":
+            nn.init.xavier_normal_(self.head.weight)
+        else:
+            raise ValueError(f"head_init must be 'he' or 'xavier', got {head_init!r}")
         nn.init.zeros_(self.head.bias)
 
     def forward(self, batch: dict) -> torch.Tensor:
@@ -109,10 +177,38 @@ class DCNv2(nn.Module):
 
         Returns the raw logit (for `dcn_loss` / `BCEWithLogitsLoss`), not the score.
         """
-        pooled = [
-            self.embeddings[field_id](ids, offsets, per_sample_weights=_normalize_weights(weights, offsets))
-            for field_id, (ids, weights, offsets) in sorted(batch.items())
-        ]
+        pooled = []
+        fields = []
+        for field_id, (ids, weights, offsets) in sorted(batch.items()):
+            if self.training and self.token_dropout:
+                # Do not invert-rescale: this intentionally simulates the
+                # zero-weight OOV entries produced by the temporal test split.
+                keep = torch.rand_like(weights) >= self.token_dropout
+                weights = weights * keep
+            fields.append((field_id, (ids, weights, offsets)))
+        l2_denominator = None
+        l2_bag_ids = {}
+        if self.pooling == "l2":
+            num_bags = fields[0][1][2].numel()
+            squared_norm = fields[0][1][1].new_zeros(num_bags)
+            for field_id, (_, weights, offsets) in fields:
+                bag_ids = _bag_ids(weights, offsets)
+                l2_bag_ids[field_id] = bag_ids
+                squared_norm.scatter_add_(0, bag_ids, weights.square())
+            l2_denominator = squared_norm.sqrt().masked_fill_(squared_norm == 0, 1.0)
+
+        for field_id, (ids, weights, offsets) in fields:
+            if self.bag_stats:
+                pooled_weights, stats = _normalized_weights_and_bounded_stats(weights, offsets)
+            elif self.pooling == "l2":
+                pooled_weights = weights / l2_denominator[l2_bag_ids[field_id]]
+            else:
+                pooled_weights = (_normalize_weights(weights, offsets)
+                                  if self.pooling == "mean" else weights)
+            field_embedding = self.embeddings[field_id](
+                ids, offsets, per_sample_weights=pooled_weights)
+            pooled.append(torch.cat((field_embedding, stats), dim=1)
+                          if self.bag_stats else field_embedding)
         u0 = torch.cat(pooled, dim=1)
 
         u_l = u0

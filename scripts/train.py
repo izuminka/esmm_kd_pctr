@@ -72,7 +72,8 @@ def build_model(cfg: dict, vocab_sizes: dict):
 def build_metric_fn(cfg: dict):
     if cfg["model"] == "dcn":
         from evaluation.dcn import evaluate_dcn
-        return lambda model, enc, y: evaluate_dcn(model, enc, y)["ctr"]["auc"]
+        metric = "ne" if cfg["training"].get("checkpoint_metric") == "ctr_ne" else "pr_auc"
+        return lambda model, enc, y: evaluate_dcn(model, enc, y)["ctr"][metric]
     if cfg["model"] == "esmm":
         from evaluation.esmm import evaluate_esmm
         population, metric = (("pcvr", "ne") if cfg["training"].get("checkpoint_metric") == "pcvr_ne"
@@ -166,6 +167,7 @@ def main():
         trainer.logged_pctr_source = logged_pctr_source
         checkpoint_metric = trainer.checkpoint_metric
         save_predictions = trainer.save_predictions
+        evaluate_test = cfg["training"].get("evaluate_test", True)
 
         trainer.fit(model, dataset, metric_fn)
 
@@ -175,7 +177,7 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-        if not load_test:
+        if not load_test and evaluate_test:
             if save_predictions:
                 _run(["predict_encoded.py", "--config", args.config, "--split", "test",
                       "--run-dir", run_dir], "Exporting test predictions")

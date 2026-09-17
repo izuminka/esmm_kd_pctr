@@ -365,10 +365,11 @@ def test_sigterm_records_the_run_as_failed(encoded, tmp_path):
     assert not (artifacts / "dcn" / "latest.json").exists()
 
 
-def test_best_pcvr_ne_prefers_lower_values(tmp_path):
+@pytest.mark.parametrize("metric", ["pcvr_ne", "ctr_ne"])
+def test_best_ne_prefers_lower_values(tmp_path, metric):
     best = str(tmp_path / "best_models.yaml")
     for run, value, accepted in [("r1", 1.2, True), ("r2", .9, True),
                                   ("r3", 1.1, False), ("r4", .9, False)]:
-        assert runs.update_best(best, "esmm", _entry(run, value, metric="pcvr_ne")) is accepted
+        assert runs.update_best(best, "esmm", _entry(run, value, metric=metric)) is accepted
     with open(best) as f:
         assert yaml.safe_load(f)["esmm"]["run"] == "r2"

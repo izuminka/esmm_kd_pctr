@@ -262,7 +262,7 @@ def update_best(best_file: str, model: str, entry: dict) -> bool:
     """Record `entry` as `model`'s best if it beats the current one on validation.
 
     Only a strictly better value on the same metric replaces an entry (lower
-    for pcvr_ne, higher for PR-AUC). When the
+    for NE, higher for PR-AUC). When the
     metric names differ the runs aren't comparable, so the entry is kept and a
     warning logged. Returns whether the file changed.
 
@@ -293,7 +293,7 @@ def _update_best_locked(best_file: str, model: str, entry: dict) -> bool:
                            "keeping %s", model, current["run"], have["metric"], entry["run"],
                            new["metric"], current["run"])
             return False
-        better = (new["value"] < have["value"] if new["metric"] == "pcvr_ne"
+        better = (new["value"] < have["value"] if new["metric"].endswith("_ne")
                   else new["value"] > have["value"])
         if not better:
             return False

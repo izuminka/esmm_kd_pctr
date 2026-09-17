@@ -41,39 +41,38 @@ dcn:
       n_conversions: 9195
   finished_at: '2026-09-16T23:36:16Z'
 esmm:
-  run: 20260916T232414Z
-  checkpoint: esmm/20260916T232414Z/best.pt
+  run: 20260917T195622Z
+  checkpoint: esmm/20260917T195622Z/best.pt
   selected_on:
     metric: ctcvr_prauc
     split: val
-    value: 0.001973585682784685
+    value: 0.0021889043883853653
     epoch: 3
   test:
     CTR:
-      auc: 0.596957152355585
-      pr_auc: 0.05537128232384811
-      ne: 1.0959933850630612
-      ce: 1.4277279172868935
+      auc: 0.5974553886922798
+      pr_auc: 0.05587580061053414
+      ne: 1.086753100975366
+      ce: 1.3784071141781007
     CTCVR:
-      auc: 0.6084999661249627
-      pr_auc: 0.00035736891302062704
-      ne: 1.436278075096819
-      ce: 2.327685732735182
+      auc: 0.6081642195244659
+      pr_auc: 0.0003604293984784536
+      ne: 1.3712315410039715
+      ce: 1.6373806246601414
+    CTCVR-logged:
+      auc: 0.6111955354142615
+      pr_auc: 0.000357068168833376
+      ne: 1.3157598467714076
+      ce: 1.3107643845160413
     pCVR:
-      auc: 0.6242807985756257
-      pr_auc: 0.009574056802477231
-      ne: 1.593996240653033
-      ce: 1.3314339484774333
+      auc: 0.6226177021974166
+      pr_auc: 0.009779928245244138
+      ne: 1.5244485004834374
+      ce: 0.9367939437194127
   trained_from:
-    commit: 28b7960eb9a8fec86ab4c57ef6f03b5531d35b54
+    commit: f8e91b5f1e699bfcd243ce5d76612752566dc3a8
     dirty: true
-    untracked:
-    - best_models.yaml
-    - models/esmm_logged_pctr.py
-    - tests/conftest.py
-    - tests/test_esmm_logged_pctr.py
-    - tests/test_runs.py
-    - training/runs.py
+    untracked: []
   data:
     train:
       n_rows: 38070359
@@ -87,4 +86,202 @@ esmm:
       n_rows: 43016614
       n_clicks: 1673447
       n_conversions: 9195
-  finished_at: '2026-09-16T23:33:07Z'
+  finished_at: '2026-09-17T20:05:56Z'
+  logged_pctr:
+    dcn_run: artifacts/dcn/20260916T232126Z
+    run_id: 20260916T232126Z
+    commit: 935a5897c785effb6ae31232c49d9415d330b502
+    selected_on:
+      metric: ctr_prauc
+      split: val
+      value: 0.08578843645709917
+      epoch: 1
+    score_column: score
+    files:
+      train:
+        file: artifacts/dcn/20260916T232126Z/predictions/train.parquet
+        rows: 38070359
+        bytes: 338448858
+        mtime: '2026-09-16T23:33:18Z'
+      val:
+        file: artifacts/dcn/20260916T232126Z/predictions/val.parquet
+        rows: 4229546
+        bytes: 37866079
+        mtime: '2026-09-16T23:33:26Z'
+      test:
+        file: artifacts/dcn/20260916T232126Z/predictions/test.parquet
+        rows: 43016614
+        bytes: 381869401
+        mtime: '2026-09-16T23:35:03Z'
+esmm_half:
+  run: 20260917T194831Z
+  checkpoint: esmm_half/20260917T194831Z/best.pt
+  selected_on:
+    metric: ctcvr_prauc
+    split: val
+    value: 0.0006973205852399322
+    epoch: 1
+  test:
+    CTR:
+      auc: 0.6072189668745915
+      pr_auc: 0.057999208913464745
+      ne: 0.9928224461362813
+      ce: 1.225174445321543
+    CTCVR:
+      auc: 0.6233433552306717
+      pr_auc: 0.0003430636730035176
+      ne: 1.0217094309818002
+      ce: 1.8764087139749863
+    CTCVR-logged:
+      auc: 0.6244642822876636
+      pr_auc: 0.0003573665070167167
+      ne: 1.0257276273133729
+      ce: 1.9552616486541599
+    pCVR:
+      auc: 0.6704355507126587
+      pr_auc: 0.010988549609780044
+      ne: 0.9872400344407207
+      ce: 1.494459879690049
+  trained_from:
+    commit: f8e91b5f1e699bfcd243ce5d76612752566dc3a8
+    dirty: true
+    untracked: []
+  data:
+    train:
+      n_rows: 38070359
+      n_clicks: 1479954
+      n_conversions: 7927
+    val:
+      n_rows: 4229546
+      n_clicks: 164302
+      n_conversions: 875
+    test:
+      n_rows: 43016614
+      n_clicks: 1673447
+      n_conversions: 9195
+  finished_at: '2026-09-17T19:53:43Z'
+  logged_pctr:
+    dcn_run: artifacts/dcn/20260916T232126Z
+    run_id: 20260916T232126Z
+    commit: 935a5897c785effb6ae31232c49d9415d330b502
+    selected_on:
+      metric: ctr_prauc
+      split: val
+      value: 0.08578843645709917
+      epoch: 1
+    score_column: score
+    files:
+      train:
+        file: artifacts/dcn/20260916T232126Z/predictions/train.parquet
+        rows: 38070359
+        bytes: 338448858
+        mtime: '2026-09-16T23:33:18Z'
+      val:
+        file: artifacts/dcn/20260916T232126Z/predictions/val.parquet
+        rows: 4229546
+        bytes: 37866079
+        mtime: '2026-09-16T23:33:26Z'
+      test:
+        file: artifacts/dcn/20260916T232126Z/predictions/test.parquet
+        rows: 43016614
+        bytes: 381869401
+        mtime: '2026-09-16T23:35:03Z'
+  train_cohort:
+    fraction: 0.5
+    ranks: 4
+    block_size: 65536
+    seed: 42
+    n_rows: 19035179
+    n_clicks: 735124
+    n_conversions: 3794
+    rank_rows:
+    - 4758795
+    - 4758795
+    - 4758795
+    - 4758794
+esmm_quarter:
+  run: 20260917T195223Z
+  checkpoint: esmm_quarter/20260917T195223Z/best.pt
+  selected_on:
+    metric: logged_ctcvr_prauc
+    split: val
+    value: 0.0005791224044975974
+    epoch: 3
+  test:
+    CTR:
+      auc: 0.5620470118227248
+      pr_auc: 0.04781223362877862
+      ne: 1.1807544375991754
+      ce: 1.5889783184050645
+    CTCVR:
+      auc: 0.5732571276815627
+      pr_auc: 0.0002869057582534172
+      ne: 1.1624085412358092
+      ce: 2.0888893845160412
+    CTCVR-logged:
+      auc: 0.6126305093254444
+      pr_auc: 0.0003340115274629871
+      ne: 1.0607314502915324
+      ce: 1.6548308778548124
+    pCVR:
+      auc: 0.6432480596485252
+      pr_auc: 0.009798663230373967
+      ne: 1.0438882684280903
+      ce: 1.206563413370038
+  trained_from:
+    commit: f8e91b5f1e699bfcd243ce5d76612752566dc3a8
+    dirty: true
+    untracked: []
+  data:
+    train:
+      n_rows: 38070359
+      n_clicks: 1479954
+      n_conversions: 7927
+    val:
+      n_rows: 4229546
+      n_clicks: 164302
+      n_conversions: 875
+    test:
+      n_rows: 43016614
+      n_clicks: 1673447
+      n_conversions: 9195
+  finished_at: '2026-09-17T19:57:26Z'
+  logged_pctr:
+    dcn_run: artifacts/dcn/20260916T232126Z
+    run_id: 20260916T232126Z
+    commit: 935a5897c785effb6ae31232c49d9415d330b502
+    selected_on:
+      metric: ctr_prauc
+      split: val
+      value: 0.08578843645709917
+      epoch: 1
+    score_column: score
+    files:
+      train:
+        file: artifacts/dcn/20260916T232126Z/predictions/train.parquet
+        rows: 38070359
+        bytes: 338448858
+        mtime: '2026-09-16T23:33:18Z'
+      val:
+        file: artifacts/dcn/20260916T232126Z/predictions/val.parquet
+        rows: 4229546
+        bytes: 37866079
+        mtime: '2026-09-16T23:33:26Z'
+      test:
+        file: artifacts/dcn/20260916T232126Z/predictions/test.parquet
+        rows: 43016614
+        bytes: 381869401
+        mtime: '2026-09-16T23:35:03Z'
+  train_cohort:
+    fraction: 0.25
+    ranks: 4
+    block_size: 65536
+    seed: 42
+    n_rows: 9517589
+    n_clicks: 373019
+    n_conversions: 2011
+    rank_rows:
+    - 2379398
+    - 2379397
+    - 2379397
+    - 2379397

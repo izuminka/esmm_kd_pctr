@@ -41,6 +41,7 @@ def tiny_batch():
         dict(objective="kd", alpha=0.5),
         dict(objective="kd", aux_weight=1.0),
         dict(objective="kd", alpha=1.5, aux_weight=1.0),
+        dict(objective="kd", alpha=0.5, aux_weight=-1.0),
         dict(objective="product", alpha=0.5),
         dict(objective="product", aux_weight=1.0),
     ],

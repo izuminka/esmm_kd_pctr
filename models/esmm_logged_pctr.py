@@ -38,6 +38,8 @@ class LoggedPctrESMM(ESMM):
                 raise ValueError("objective 'kd' requires alpha and aux_weight")
             if not 0 <= alpha <= 1:
                 raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+            if aux_weight < 0:
+                raise ValueError(f"aux_weight must not be negative, got {aux_weight}")
         elif alpha is not None or aux_weight is not None:
             raise ValueError("objective 'product' takes no alpha or aux_weight")
 

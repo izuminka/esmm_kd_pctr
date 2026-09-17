@@ -39,6 +39,8 @@ can differ in the final decimal places due to prediction serialization.
 | DCN mean + bag statistics | 42 | 0.945847523 | 1 | `dcn_matched_stats/20260917T222847Z` |
 | DCN weight decay 1e-4 | 42 | 0.949043027 | 5 | `dcn_matched_stats_wd1e4/20260917T231025Z` |
 | DCN weight decay 1e-6 | 42 | 0.944903250 | 1 | `dcn_matched_stats_wd1e6/20260917T231439Z` |
+| DCN weight decay 3e-6 | 42 | 0.944234032 | 2 | `dcn_matched_stats_wd3e6/20260917T232959Z` |
+| DCN weight decay 1e-5 | 42 | 0.944776065 | 2 | `dcn_matched_stats_wd1e5/20260917T232959Z` |
 | Same unregularized DCN, cross layers removed | 42 | 0.947040632 | 1 | `dcn_matched_stats_no_cross/20260917T231620Z` |
 | ESMM CTR-selected reference | 43 | 0.945347582 | 1 | `esmm_ctr_reference_seed43/20260917T232216Z` |
 | DCN weight decay 1e-6 | 43 | 0.944848730 | 1 | `dcn_matched_stats_wd1e6_seed43/20260917T232216Z` |
@@ -48,6 +50,14 @@ The regularized DCN improves NE by about 0.111% at seed 42 and 0.053% at seed
 unregularized model, supporting retention of the explicit cross network.
 These comparisons do not establish statistical significance.
 
+The intermediate weight-decay runs also completed five training epochs. The
+best is 3e-6 at epoch 2, a 0.182% NE reduction against seed-42 ESMM; the 0.5%
+target remains unmet. Both intermediate settings worsen after epoch 2.
+Both runs are FINISHED, and their restored-checkpoint validation NE agrees
+with the selection score within 1e-6. The 3e-6 model has validation ROC-AUC
+0.693054029, PR-AUC 0.087550186, NE 0.944234018, and calibration ratio
+1.016065975. Neither run contains a test prediction artifact or test metrics.
+
 Training loss continues to decrease while validation NE deteriorates after
 epoch 1 in the lightly regularized runs. For seed 42, weight decay 1e-6 gives
 validation NE 0.94490, 0.94647, 0.97326, 1.08168, 1.26618 over five epochs.
@@ -56,10 +66,12 @@ reduces that deterioration but gives a worse best validation result.
 
 ## Experiments in flight
 
-- Slurm 444: weight decay 3e-6; only weight decay changes from the 1e-6 recipe.
-- Slurm 445: weight decay 1e-5; the same controlled comparison.
-- Slurm 446, after 445: `structure: stacked` with weight decay 1e-6; explicit
+- Slurm 446 is running: `structure: stacked` with weight decay 1e-6; explicit
   crosses feed the MLP, rather than running parallel to it. Other options match.
+- Slurm 447: 64-dimensional embeddings with weight decay 3e-6. Only embedding
+  width changes from job 444; the raw inputs and evaluation population remain
+  fixed. This tests additional capacity under regularization, not equality of
+  model parameter counts with ESMM.
 
 Use `bash_scripts/train_dcn.sh` with `DCN_CONFIG` pointing to the corresponding
 tracked YAML. The seed-43 comparison is in `bash_scripts/compare_ctr_seed43.sh`.

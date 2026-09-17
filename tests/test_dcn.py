@@ -70,6 +70,44 @@ def test_invalid_pooling_is_rejected():
         DCNv2({"f": 2}, pooling="max")
 
 
+def test_stacked_structure_sends_crosses_through_deep_network():
+    model = DCNv2({"f": 1}, emb_dim=1, cross_rank=1, num_cross_layers=1,
+                  deep_hidden_dims=(1,), dropout=0, structure="stacked")
+    with torch.no_grad():
+        model.embeddings["f"].weight.fill_(2)
+        model.cross_layers[0].v.weight.fill_(1)
+        model.cross_layers[0].u.weight.fill_(3)
+        model.cross_layers[0].u.bias.zero_()
+        model.deep[0].weight.fill_(2)
+        model.deep[0].bias.zero_()
+        model.head.weight.fill_(3)
+        model.head.bias.zero_()
+    batch = {"f": (torch.tensor([1]), torch.ones(1), torch.tensor([0]))}
+    # Input 2 -> cross 2*(3*2)+2=14 -> deep 28 -> logit 84.
+    logit = model(batch)
+    assert logit.item() == pytest.approx(84)
+    logit.sum().backward()
+    assert model.cross_layers[0].u.weight.grad.item() == pytest.approx(24)
+
+
+def test_parallel_structure_remains_default_checkpoint_compatible():
+    torch.manual_seed(42)
+    original = DCNv2({"f": 3}, emb_dim=2, cross_rank=1, deep_hidden_dims=(3,))
+    torch.manual_seed(42)
+    explicit = DCNv2({"f": 3}, emb_dim=2, cross_rank=1, deep_hidden_dims=(3,),
+                     structure="parallel")
+    explicit.load_state_dict(original.state_dict(), strict=True)
+    batch = {"f": (torch.tensor([1, 2]), torch.ones(2), torch.tensor([0, 1]))}
+    original.eval()
+    explicit.eval()
+    assert torch.equal(original(batch), explicit(batch))
+
+
+def test_invalid_structure_is_rejected():
+    with pytest.raises(ValueError, match="structure"):
+        DCNv2({"f": 2}, structure="unknown")
+
+
 def test_bag_stats_retain_bounded_count_and_weight_magnitude():
     model = DCNv2({"f": 3}, emb_dim=1, cross_rank=1, num_cross_layers=0,
                   deep_hidden_dims=(), dropout=0, pooling="mean", bag_stats=True)

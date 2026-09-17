@@ -339,6 +339,28 @@ def test_train_py_records_a_finished_run_and_a_failed_one(encoded, tmp_path):
     assert open(best_file).read() == best_before, "a failed run touched the best file"
 
 
+def test_validation_only_run_does_not_load_or_report_test(encoded, tmp_path):
+    enc_dir, _, _ = encoded
+    artifacts = tmp_path / "artifacts"
+    cfg = _small_dcn_cfg(enc_dir, artifacts)
+    cfg["training"].update(evaluate_test=False, load_test=True, checkpoint_metric="ctr_ne")
+    done = _train(cfg, tmp_path, "validation_only", str(tmp_path / "best.yaml"))
+    assert done.returncode == 0, done.stderr[-3000:]
+    run_dir = runs.resolve_run(str(artifacts), "dcn")
+    assert "test=not loaded" in done.stderr
+    assert not os.path.exists(os.path.join(run_dir, "predictions", "test.parquet"))
+    assert runs.read_run(run_dir)["test"] == {}
+    # A stale/corrupt test artifact must not even be read by a tuning report.
+    with open(os.path.join(run_dir, "predictions", "test.parquet"), "w") as f:
+        f.write("must not be opened")
+    report = subprocess.run(
+        [sys.executable, os.path.join(CODE_DIR, "scripts", "report_metrics.py"),
+         "--run-dir", run_dir], capture_output=True, text=True, timeout=60)
+    assert report.returncode == 0, report.stderr
+    with open(os.path.join(run_dir, "metrics.json")) as f:
+        assert {row["split"] for row in json.load(f)} == {"train", "val"}
+
+
 def test_sigterm_records_the_run_as_failed(encoded, tmp_path):
     """SLURM cancellation and time limits arrive as SIGTERM before any SIGKILL."""
     enc_dir, _, _ = encoded

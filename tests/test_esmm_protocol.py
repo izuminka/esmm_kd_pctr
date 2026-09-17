@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from scripts.train import build_model, load_config
+from scripts.train import build_model, build_metric_fn, load_config
 from scripts.report_metrics import logged_ctcvr_splits, metric_rows
 from training.dataset import NumpyDataset
 from training.trainer import Trainer
@@ -35,6 +35,10 @@ def test_native_and_logged_configs_use_their_prescribed_validation_score(config)
     native_metric = "pcvr_ne" if config.stem in {
         "esmm", "esmm_half", "esmm_third", "esmm_quarter"
     } else "ctcvr_prauc"
+    if config.stem.startswith("esmm_ctr_reference_"):
+        native_metric = "ctr_ne"
+        assert cfg["training"]["evaluate_test"] is False
+        assert cfg["training"]["load_test"] is False
     assert cfg["training"]["checkpoint_metric"] == ("logged_ctcvr_prauc" if logged else native_metric)
     assert ("val" in logged_ctcvr_splits(cfg)) == logged
     assert "train" not in logged_ctcvr_splits(cfg)
@@ -72,6 +76,19 @@ class TinySplit:
 
     def get_batch(self, idx):
         return {"f": (idx + 1, torch.ones(len(idx)), torch.arange(len(idx)))}, self.ys[idx].float(), self.zs[idx].float()
+
+
+@pytest.mark.parametrize("metric", ["ctr_ne", "ctr_prauc", "pcvr_ne", "ctcvr_prauc"])
+def test_legacy_and_encoded_esmm_selection_agree(tmp_path, metric):
+    cfg = tiny_cfg(tmp_path)
+    cfg["training"]["checkpoint_metric"] = metric
+    cfg["evaluation"]["is_logged_ctcvr"] = False
+    split = TinySplit()
+    model = build_model(cfg, {"f": 8})
+    batch, y, z = split.get_batch(torch.arange(len(split)))
+    legacy = build_metric_fn(cfg)(model, batch, y, z)
+    encoded, _ = Trainer(cfg, str(tmp_path))._val_score_numpy(model, split)
+    assert legacy == pytest.approx(encoded, abs=1e-6)
 
 
 @pytest.mark.parametrize("objective", [None, "kd", "product"])

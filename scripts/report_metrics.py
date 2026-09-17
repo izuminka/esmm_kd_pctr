@@ -135,7 +135,10 @@ def main():
     logged_splits = logged_ctcvr_splits(report_cfg)
 
     rows = []
-    for split in ("train", "val", "test"):
+    report_splits = (("train", "val", "test")
+                     if report_cfg.get("training", {}).get("evaluate_test", True)
+                     else ("train", "val"))
+    for split in report_splits:
         parquet = os.path.join(run_dir, "predictions", f"{split}.parquet")
         scored = os.path.join(run_dir, "metrics", f"{split}.json")
         if os.path.exists(parquet):

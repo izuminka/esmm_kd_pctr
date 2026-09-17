@@ -76,8 +76,13 @@ def build_metric_fn(cfg: dict):
         return lambda model, enc, y: evaluate_dcn(model, enc, y)["ctr"][metric]
     if cfg["model"] == "esmm":
         from evaluation.esmm import evaluate_esmm
-        population, metric = (("pcvr", "ne") if cfg["training"].get("checkpoint_metric") == "pcvr_ne"
-                              else ("ctcvr", "pr_auc"))
+        metric_name = cfg["training"].get("checkpoint_metric", "ctcvr_prauc")
+        population, metric = {
+            "pcvr_ne": ("pcvr", "ne"),
+            "ctr_ne": ("ctr", "ne"),
+            "ctr_prauc": ("ctr", "pr_auc"),
+            "ctcvr_prauc": ("ctcvr", "pr_auc"),
+        }[metric_name]
         return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z, is_logged_ctcvr=False)[population][metric]
     if cfg["model"] == "esmm_logged_pctr":
         return None  # encoded data path only, where the trainer scores validation itself
@@ -133,7 +138,8 @@ def main():
         device = resolve_device(cfg["training"].get("gpus", -1))
         logger.info("Loading encoded dataset from %s onto %s...", encoded_dir, device)
         t0 = time.perf_counter()
-        load_test = cfg["training"]["load_test"]
+        evaluate_test = cfg["training"].get("evaluate_test", True)
+        load_test = cfg["training"]["load_test"] and evaluate_test
         dataset = NumpyDataset.load(encoded_dir, device=device, load_test=load_test)
         logger.info("Dataset ready in %.1fs  (train=%d, val=%d, test=%s)",
                     time.perf_counter() - t0, len(dataset.train), len(dataset.val),

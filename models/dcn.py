@@ -1,12 +1,13 @@
 """DCN-V2 pCTR: a separate click-only model (not ESMM's auxiliary CTR tower).
 
-Architecture and init match the paper's Ali-CCP recipe:
+Configurable architecture used by the Ali-CCP experiments:
   - one EmbeddingBag per categorical field, width emb_dim, with configurable
     weighted-sum, weighted-mean, or sample-L2-normalized pooling
   - optional bounded log bag-count and log weight-mass features
   - num_cross_layers rank-cross_rank low-rank cross layers over the pooled input
   - a deep branch: cross_dim -> deep_hidden_dims..., ReLU + Dropout(dropout) per hidden layer
-  - concat(cross output, deep output) -> one logit -> raw sigmoid, no calibration
+  - parallel (default): concatenate cross/deep outputs before the logit head
+  - stacked: cross output -> deep network -> logit head (DCN-V2 section 3.4)
   - embeddings ~ U(-1/sqrt(K_f), 1/sqrt(K_f)); configurable He/Xavier cross
     and head initialization; ReLU deep layers use He-normal; biases are zero
 
@@ -137,8 +138,12 @@ class DCNv2(nn.Module):
         cross_init: str = "he",
         head_init: str = "he",
         token_dropout: float = 0.0,
+        structure: str = "parallel",
     ):
         super().__init__()
+        if structure not in ("parallel", "stacked"):
+            raise ValueError(f"structure must be 'parallel' or 'stacked', got {structure!r}")
+        self.structure = structure
         if pooling not in ("mean", "sum", "l2"):
             raise ValueError(f"pooling must be 'mean', 'sum', or 'l2', got {pooling!r}")
         self.pooling = pooling
@@ -163,7 +168,8 @@ class DCNv2(nn.Module):
             _CrossLayer(cross_dim, cross_rank, cross_init) for _ in range(num_cross_layers)
         )
         self.deep = _make_deep_branch(cross_dim, deep_hidden_dims, dropout)
-        self.head = nn.Linear(cross_dim + deep_dims[-1], 1)
+        head_dim = deep_dims[-1] + (cross_dim if structure == "parallel" else 0)
+        self.head = nn.Linear(head_dim, 1)
         if head_init == "he":
             nn.init.kaiming_normal_(self.head.weight, nonlinearity="relu")
         elif head_init == "xavier":
@@ -215,8 +221,12 @@ class DCNv2(nn.Module):
         for cross_layer in self.cross_layers:
             u_l = cross_layer(u0, u_l)
 
-        deep_out = self.deep(u0)
-        logit = self.head(torch.cat([u_l, deep_out], dim=1)).squeeze(-1)
+        # DCN-V2 section 3.4: either concatenate parallel branch outputs,
+        # or let the deep network learn from the explicit crosses directly.
+        deep_out = self.deep(u0 if self.structure == "parallel" else u_l)
+        head_input = (torch.cat([u_l, deep_out], dim=1)
+                      if self.structure == "parallel" else deep_out)
+        logit = self.head(head_input).squeeze(-1)
         return logit
 
 

@@ -7,8 +7,10 @@ Architecture and init match the paper's Ali-CCP recipe:
   - embeddings ~ U(-1/sqrt(K_f), 1/sqrt(K_f)); dense weight/bias ~ U(-1/sqrt(d_in), 1/sqrt(d_in))
 
 Loss: CTR term is two-logit cross-entropy vs y; CTCVR term is BCE(y*z, q*v).
+aux_weight scales the whole CTR term and leaves the CTCVR term's weight at one;
+1 is the canonical ESMM loss.
 
-Paper defaults: emb_dim=20, tower_dims=(460, 360, 200, 80, 2).
+Paper defaults: emb_dim=20, tower_dims=(460, 360, 200, 80, 2), aux_weight=1.
 tower_dims[0] must equal num_fields * emb_dim.
 """
 
@@ -42,10 +44,12 @@ class ESMM(nn.Module):
         field_vocab_sizes: dict[str, int],
         emb_dim: int = 20,
         tower_dims: tuple = _PAPER_TOWER_DIMS,
+        aux_weight: float = 1.0,
     ):
         super().__init__()
         self.emb_dim = emb_dim
         self.tower_dims = tuple(tower_dims)
+        self.aux_weight = aux_weight
         self.field_ids = sorted(field_vocab_sizes)
         self.embeddings = nn.ModuleDict()
         for field_id in self.field_ids:
@@ -60,24 +64,29 @@ class ESMM(nn.Module):
         self.ctr_tower = _make_tower(self.tower_dims)
         self.cvr_tower = _make_tower(self.tower_dims)
 
-    def forward(
-        self, batch: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """`batch`: field_id -> (ids, per_sample_weights, offsets), as from `data.vocab.encode_batch`."""
+    def _pool(self, batch: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+        """Per-field pooled embeddings concatenated in field order: the shared tower input."""
         pooled = [
             self.embeddings[field_id](ids, offsets, per_sample_weights=weights)
             for field_id, (ids, weights, offsets) in sorted(batch.items())
         ]
-        h = torch.cat(pooled, dim=1)
+        return torch.cat(pooled, dim=1)
+
+    def forward(
+        self, batch: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """`batch`: field_id -> (ids, per_sample_weights, offsets), as from `data.vocab.encode_batch`."""
+        h = self._pool(batch)
         q = torch.softmax(self.ctr_tower(h), dim=1)[:, 1]
         v = torch.softmax(self.cvr_tower(h), dim=1)[:, 1]
         return q, v
 
 
-def esmm_loss(y: torch.Tensor, z: torch.Tensor, q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """L_ESMM = mean[ BCE(y, q) + BCE(y*z, q*v) ], eps-clipped for stability."""
+def esmm_loss(y: torch.Tensor, z: torch.Tensor, q: torch.Tensor, v: torch.Tensor,
+              aux_weight: float = 1.0) -> torch.Tensor:
+    """L_ESMM = mean[ aux_weight * BCE(y, q) + BCE(y*z, q*v) ], eps-clipped for stability."""
     q = q.clamp(EPS, 1 - EPS)
     qv = (q * v).clamp(EPS, 1 - EPS)
     ctr_term = F.binary_cross_entropy(q, y, reduction="none")
     ctcvr_term = F.binary_cross_entropy(qv, y * z, reduction="none")
-    return (ctr_term + ctcvr_term).mean()
+    return (aux_weight * ctr_term + ctcvr_term).mean()

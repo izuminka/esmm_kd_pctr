@@ -119,6 +119,9 @@ class SplitData:
 
         self.ids, self.weights, self.offsets = _load_ragged(split_dir, field_ids, device)
         self._n = len(self.sample_ids)
+        # Frozen per-row pCTR from a DCN run, aligned to these rows; attached by
+        # data.logged_pctr when a config names one, else None.
+        self.logged_pctr = None
 
     def __len__(self) -> int:
         return self._n

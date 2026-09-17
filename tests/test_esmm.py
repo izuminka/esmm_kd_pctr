@@ -61,6 +61,23 @@ def test_loss_matches_hand_computed_bce():
     assert loss == pytest.approx(expected, rel=1e-5)
 
 
+def test_aux_weight_scales_only_the_ctr_term():
+    y = torch.tensor([1.0, 0.0, 1.0])
+    z = torch.tensor([1.0, 0.0, 0.0])
+    q = torch.tensor([0.8, 0.3, 0.6])
+    v = torch.tensor([0.7, 0.4, 0.2])
+
+    def bce(a, b):
+        return -(a * math.log(b) + (1 - a) * math.log(1 - b))
+
+    expected = np.mean([2.0 * bce(y[i].item(), q[i].item())
+                        + bce((y[i] * z[i]).item(), (q[i] * v[i]).item()) for i in range(3)])
+    assert esmm_loss(y, z, q, v, aux_weight=2.0).item() == pytest.approx(expected, rel=1e-5)
+    assert esmm_loss(y, z, q, v, aux_weight=1.0).item() == esmm_loss(y, z, q, v).item()
+    assert ESMM({"f1": 5}, aux_weight=2.0).aux_weight == 2.0
+    assert ESMM({"f1": 5}).aux_weight == 1.0  # the canonical ESMM loss
+
+
 def test_loss_finite_at_extreme_predictions():
     y = torch.tensor([1.0, 0.0, 1.0, 0.0])
     z = torch.tensor([1.0, 0.0, 0.0, 0.0])

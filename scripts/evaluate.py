@@ -1,8 +1,8 @@
 """Evaluate a saved checkpoint on a data split.
 
 Usage:
-    python scripts/evaluate.py --checkpoint artifacts/dcn_model.pt --split val
-    python scripts/evaluate.py --checkpoint artifacts/dcn_model.pt --split test \\
+    python scripts/evaluate.py --checkpoint artifacts/dcn/20260916T020356Z/best.pt --split val
+    python scripts/evaluate.py --checkpoint artifacts/dcn/20260916T020356Z/best.pt --split test \\
         --data-dir /path/to/ali-ccp
 """
 
@@ -75,7 +75,7 @@ def main():
         results = evaluate_dcn(model, encoded, y)
     elif ckpt["model_type"] == "esmm":
         from evaluation.esmm import evaluate_esmm
-        results = evaluate_esmm(model, encoded, y, z)
+        results = evaluate_esmm(model, encoded, y, z, is_logged_ctcvr=False)  # no logged pCTR on this path
     else:
         raise ValueError(f"Unknown model_type: {ckpt['model_type']!r}")
 

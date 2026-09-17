@@ -26,7 +26,7 @@ def test_population_routing_is_correct():
     # tower's fixed 460-dim input without needing all 23 real fields
     model = ESMM(vocab_sizes, emb_dim=460)
 
-    result = evaluate_esmm(model, encoded, y, z)
+    result = evaluate_esmm(model, encoded, y, z, is_logged_ctcvr=False)
 
     assert set(result.keys()) == {"ctr", "ctcvr", "pcvr"}
     for population in result.values():
@@ -61,7 +61,7 @@ def test_ctcvr_label_is_y_times_z_not_z_alone():
     torch.manual_seed(0)
     model = ESMM(vocab_sizes, emb_dim=460)
 
-    result = evaluate_esmm(model, encoded, y, z)
+    result = evaluate_esmm(model, encoded, y, z, is_logged_ctcvr=False)
 
     model.eval()
     with torch.no_grad():
@@ -78,7 +78,7 @@ def test_evaluate_esmm_on_real_data(real_batch):
     encoded, y, z, vocab_sizes = real_batch
     model = ESMM(vocab_sizes)
 
-    result = evaluate_esmm(model, encoded, y, z)
+    result = evaluate_esmm(model, encoded, y, z, is_logged_ctcvr=False)
 
     n_clicked = int((y == 1).sum().item())
     assert n_clicked > 0

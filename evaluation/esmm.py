@@ -1,9 +1,14 @@
-"""Scores an ESMM model against the papers three reported populations.
+"""Scores an ESMM model against the papers reported populations.
 
 Evaluation contract (Appendix, tab:aliccp-evaluation-contracts):
-  CTR         -- score q,     label y,   all impressions
-  CTCVR       -- score q * v, label y*z, all impressions
-  clicked pCVR -- score v,    label z,   only impressions where y == 1
+  CTR          -- score q,     label y,   all impressions
+  CTCVR        -- score q * v, label y*z, all impressions
+  clicked pCVR -- score v,     label z,   only impressions where y == 1
+  CTCVR logged -- score p * v, label y*z, all impressions (optional)
+
+CTCVR logged scores the product served with the frozen logged pCTR p
+(tab:aliccp-quarter-logged-pctr). It is on by default and needs p; plain ESMM
+turns it off. A model with no auxiliary CTR head (q is None) omits CTR and CTCVR.
 
 The CTCVR label is y*z (Eq. method-esmm), not z alone. z<=y should already
 hold after data.raw's invalid-row filtering, making y*z == z, but computing
@@ -16,19 +21,26 @@ import torch
 from evaluation.metrics import compute_metrics
 
 
-def evaluate_esmm(model, batch, y: torch.Tensor, z: torch.Tensor) -> dict:
+def evaluate_esmm(model, batch, y: torch.Tensor, z: torch.Tensor,
+                  p: torch.Tensor | None = None, is_logged_ctcvr: bool = True) -> dict:
+    if is_logged_ctcvr and p is None:
+        raise ValueError("logged CTCVR needs the logged pCTR p; pass p, or is_logged_ctcvr=False")
+
     model.eval()
     with torch.no_grad():
         q, v = model(batch)
 
-    q_np = q.numpy()
     v_np = v.numpy()
     y_np = y.numpy()
     z_np = z.numpy()
     clicked = y_np == 1
 
-    return {
-        "ctr": compute_metrics(q_np, y_np),
-        "ctcvr": compute_metrics(q_np * v_np, y_np * z_np),
-        "pcvr": compute_metrics(v_np[clicked], z_np[clicked]),
-    }
+    results = {}
+    if q is not None:
+        q_np = q.numpy()
+        results["ctr"] = compute_metrics(q_np, y_np)
+        results["ctcvr"] = compute_metrics(q_np * v_np, y_np * z_np)
+    results["pcvr"] = compute_metrics(v_np[clicked], z_np[clicked])
+    if is_logged_ctcvr:
+        results["ctcvr_logged"] = compute_metrics(p.numpy() * v_np, y_np * z_np)
+    return results

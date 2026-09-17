@@ -36,6 +36,7 @@ def _make_cfg(out_dir: str, epochs: int = 1) -> dict:
             "gpus": 0,    # CPU for tests (no GPU dependency)
             "out_dir": str(out_dir),
         },
+        "evaluation": {"is_logged_ctcvr": False},  # this Impression path carries no logged pCTR
     }
 
 
@@ -53,7 +54,7 @@ def artifacts(tmp_path_factory):
 
     dataset = Dataset(train=train_imps, val=val_imps, test=test_imps, vocabs=vocabs, field_ids=field_ids)
     model = ESMM(dataset.vocab_sizes)
-    metric_fn = lambda m, enc, y: evaluate_esmm(m, enc, y, torch.zeros_like(y))["ctr"]["auc"]
+    metric_fn = lambda m, enc, y: evaluate_esmm(m, enc, y, torch.zeros_like(y), is_logged_ctcvr=False)["ctr"]["auc"]
 
     trainer = Trainer(cfg, root_dir=out)
     trainer.out_dir = out
@@ -62,7 +63,7 @@ def artifacts(tmp_path_factory):
 
 
 def test_checkpoint_keys(artifacts):
-    ckpt = torch.load(os.path.join(artifacts, "esmm_model.pt"), weights_only=False)
+    ckpt = torch.load(os.path.join(artifacts, "best.pt"), weights_only=False)
     assert set(ckpt.keys()) == {"model_type", "model_state_dict", "vocabs", "field_ids", "vocab_sizes", "split_rule", "model_params"}
     assert ckpt["model_type"] == "esmm"
     assert len(ckpt["field_ids"]) > 0
@@ -73,8 +74,8 @@ def test_checkpoint_keys(artifacts):
 
 @pytest.mark.parametrize("split", ["train", "val", "test"])
 def test_predictions_schema_and_range(artifacts, split):
-    path = os.path.join(artifacts, f"predictions_{split}.parquet")
-    assert os.path.exists(path), f"missing predictions_{split}.parquet"
+    path = os.path.join(artifacts, "predictions", f"{split}.parquet")
+    assert os.path.exists(path), f"missing predictions/{split}.parquet"
     df = pd.read_parquet(path)
     assert list(df.columns) == ["sample_id", "y", "z", "q", "v"]
     assert df["q"].dtype == "float32"
@@ -85,7 +86,7 @@ def test_predictions_schema_and_range(artifacts, split):
 
 
 def test_train_val_sizes_match_80_20_split(artifacts):
-    n_train = len(pd.read_parquet(os.path.join(artifacts, "predictions_train.parquet")))
-    n_val = len(pd.read_parquet(os.path.join(artifacts, "predictions_val.parquet")))
+    n_train = len(pd.read_parquet(os.path.join(artifacts, "predictions", "train.parquet")))
+    n_val = len(pd.read_parquet(os.path.join(artifacts, "predictions", "val.parquet")))
     total = n_train + n_val
     assert abs(n_train / total - 0.8) < 0.05

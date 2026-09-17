@@ -7,6 +7,8 @@ Usage (via scripts/train.py — don't instantiate directly in tests):
     trainer.fit(model, dataset, metric_fn)
 """
 
+import csv
+import json
 import logging
 import os
 import random
@@ -14,6 +16,7 @@ import time
 import warnings
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -60,6 +63,10 @@ def _to_device(encoded: dict, device: torch.device) -> dict:
     return {k: tuple(t.to(device, non_blocking=True) for t in v) for k, v in encoded.items()}
 
 
+# Validation PR-AUC of each CTCVR product, logged per epoch for ESMM models.
+_ESMM_HISTORY_COLUMNS = ("val_ctcvr_prauc", "val_ctcvr_logged_prauc")
+
+
 # y/z are 0/1 labels; pin them so the schema does not depend on whether the
 # caller came from the tensor path (floats) or the Impression path (ints).
 _LABEL_DTYPES = {"y": "int8", "z": "int8"}
@@ -85,6 +92,36 @@ def save_esmm_predictions(ids, ys, zs, q_scores, v_scores, path: str) -> None:
     save_scores(ids, ys, zs, {"q": q_scores, "v": v_scores}, path)
 
 
+def write_split(run_dir: str, split: str, model: str, ids, ys, zs, scores: dict,
+                save_predictions: bool) -> str:
+    """Write one split's predictions, or only its metrics; returns the path written.
+
+    With predictions, writes <run>/predictions/<split>.parquet. Without, scores the
+    split in memory and writes its metric rows to <run>/metrics/<split>.json, which
+    scripts/report_metrics.py reads in place of the parquet. Labels and scores are
+    cast to the parquet's dtypes first, so both routes compute identical metrics.
+    """
+    if save_predictions:
+        path = os.path.join(run_dir, "predictions", f"{split}.parquet")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        save_scores(ids, ys, zs, scores, path)
+        return path
+
+    from scripts.report_metrics import metric_rows
+
+    path = os.path.join(run_dir, "metrics", f"{split}.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    rows = metric_rows(
+        split, model,
+        np.asarray(ys).astype(_LABEL_DTYPES["y"]),
+        np.asarray(zs).astype(_LABEL_DTYPES["z"]),
+        {c: np.asarray(s, dtype=np.float32) for c, s in scores.items()},
+    )
+    with open(path, "w") as f:
+        json.dump(rows, f, indent=2)
+    return path
+
+
 class Trainer:
     def __init__(self, cfg: dict, root_dir: str):
         tr = cfg["training"]
@@ -100,6 +137,16 @@ class Trainer:
         # not of the architecture: the recipe selects the click-only model on its
         # CTR head and ESMM on its native product.
         self.checkpoint_metric = tr.get("checkpoint_metric", "ctr_prauc")
+        from scripts.report_metrics import ESMM_MODELS  # the population definitions live there
+        self.is_esmm = self.model_name in ESMM_MODELS
+        # ESMM models also score CTCVR on the logged pCTR (p * v) unless the config's
+        # evaluation.is_logged_ctcvr turns it off.
+        self.is_logged_ctcvr = self.is_esmm and cfg.get("evaluation", {}).get("is_logged_ctcvr", True)
+        # Where the logged pCTR came from (see data.logged_pctr); the caller sets it
+        # when a config names one, and it is saved with every checkpoint.
+        self.logged_pctr_source = None
+        # False scores each split in memory instead of exporting its predictions.
+        self.save_predictions = tr.get("save_predictions", True)
         self.out_dir = os.path.join(root_dir, tr["out_dir"])
         self.device = resolve_device(tr.get("gpus", -1))
         es = tr.get("early_stopping", {})
@@ -122,13 +169,25 @@ class Trainer:
         from training.dataset import NumpyDataset
         use_numpy = isinstance(dataset, NumpyDataset)
 
+        is_logged_pctr_needed = self.is_logged_ctcvr or self.model_name == "esmm_logged_pctr"
+        if is_logged_pctr_needed and not (use_numpy and dataset.train.logged_pctr is not None
+                                          and dataset.val.logged_pctr is not None):
+            raise ValueError(f"{self.model_name} needs logged pCTR on the encoded train and val "
+                             "splits (config logged_pctr), or evaluation.is_logged_ctcvr: false")
+        if self.checkpoint_metric == "logged_ctcvr_prauc" and not self.is_logged_ctcvr:
+            raise ValueError("checkpoint_metric logged_ctcvr_prauc needs evaluation.is_logged_ctcvr on")
+
         random.seed(self.seed)
         os.makedirs(self.out_dir, exist_ok=True)
 
         device = self.device
         model = model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
-        checkpoint_path = os.path.join(self.out_dir, f"{self.model_name}_model.pt")
+        checkpoint_path = os.path.join(self.out_dir, "best.pt")
+        history_path = os.path.join(self.out_dir, "history.csv")
+        history_extras = _ESMM_HISTORY_COLUMNS[:2 if self.is_logged_ctcvr else 1] if self.is_esmm else ()
+        with open(history_path, "w", newline="") as f:
+            csv.writer(f).writerow(["epoch", "loss", "val_score", "seconds", "saved", *history_extras])
 
         if not use_numpy:
             val_encoded = _to_device(
@@ -159,15 +218,21 @@ class Trainer:
             epoch_secs = time.perf_counter() - t0
 
             if use_numpy:
-                score = self._val_score_numpy(model, dataset.val)
+                score, extras = self._val_score_numpy(model, dataset.val)
             else:
-                score = metric_fn(model, val_encoded, val_y)
+                score, extras = metric_fn(model, val_encoded, val_y), {}
 
             logger.info(
-                "Epoch %d/%d  loss=%.4f  val_score=%.4f  time=%.1fs",
+                "Epoch %d/%d  loss=%.4f  val_score=%.4f  time=%.1fs %s",
                 epoch, self.epochs, loss, score, epoch_secs,
+                "  ".join(f"{k}={v:.6f}" for k, v in extras.items()),
             )
-            if score > best_score + self.es_min_delta:
+            saved = score > best_score + self.es_min_delta
+            # Appended per epoch so a run that dies mid-training keeps its history.
+            with open(history_path, "a", newline="") as f:
+                csv.writer(f).writerow([epoch, loss, score, round(epoch_secs, 1), saved,
+                                        *(extras.get(c, "") for c in history_extras)])
+            if saved:
                 best_score = score
                 no_improve = 0
                 ckpt_data = {
@@ -178,11 +243,17 @@ class Trainer:
                     "vocab_sizes": dataset.vocab_sizes,
                     "split_rule": SPLIT_RULE,
                 }
-                if self.model_name == "esmm":
+                if self.is_esmm:
                     ckpt_data["model_params"] = {
                         "emb_dim": model.emb_dim,
                         "tower_dims": model.tower_dims,
+                        "aux_weight": model.aux_weight,
                     }
+                if self.model_name == "esmm_logged_pctr":
+                    ckpt_data["model_params"].update(
+                        objective=model.objective, alpha=model.alpha, aux_weight=model.aux_weight)
+                if self.logged_pctr_source is not None:
+                    ckpt_data["logged_pctr"] = self.logged_pctr_source
                 torch.save(ckpt_data, checkpoint_path)
                 logger.info("  -> checkpoint saved (val_score=%.4f)", score)
             else:
@@ -196,28 +267,29 @@ class Trainer:
         ckpt = torch.load(checkpoint_path, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
 
-        logger.info("Exporting predictions...")
+        logger.info("%s...", "Exporting predictions" if self.save_predictions else "Scoring splits")
         if use_numpy:
             splits = [("train", dataset.train), ("val", dataset.val), ("test", dataset.test)]
             for split_name, split_data in splits:
                 if split_data is None:  # split not loaded (see NumpyDataset.load(load_test=))
-                    logger.info("  %s: not loaded, skipping export", split_name)
+                    logger.info("  %s: not loaded, skipping", split_name)
                     continue
                 t0 = time.perf_counter()
-                path = os.path.join(self.out_dir, f"predictions_{split_name}.parquet")
                 ids, ys, zs, scores = self._predict_numpy(model, split_data)
-                save_scores(ids, ys, zs, scores, path)
+                path = write_split(self.out_dir, split_name, self.model_name,
+                                   ids, ys, zs, scores, self.save_predictions)
                 logger.info("  %s: %d rows -> %s (%.1fs)", split_name, len(ids), path, time.perf_counter() - t0)
         else:
             for split_name, imps in [("train", dataset.train), ("val", dataset.val), ("test", dataset.test)]:
                 t0 = time.perf_counter()
-                path = os.path.join(self.out_dir, f"predictions_{split_name}.parquet")
                 if self.model_name == "esmm":
                     ids, ys, zs, qs, vs = self.predict_esmm(model, imps, dataset.vocabs, field_ids)
-                    save_esmm_predictions(ids, ys, zs, qs, vs, path)
+                    scores = {"q": qs, "v": vs}
                 else:
-                    ids, ys, zs, scores = self.predict(model, imps, dataset.vocabs, field_ids)
-                    save_predictions(ids, ys, zs, scores, path)
+                    ids, ys, zs, score = self.predict(model, imps, dataset.vocabs, field_ids)
+                    scores = {"score": score}
+                path = write_split(self.out_dir, split_name, self.model_name,
+                                   ids, ys, zs, scores, self.save_predictions)
                 logger.info("  %s: %d rows -> %s (%.1fs)", split_name, len(ids), path, time.perf_counter() - t0)
 
         return checkpoint_path
@@ -277,21 +349,27 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _epoch_order(self, n: int, epoch: int, device: torch.device) -> torch.Tensor:
-        """Row order for one epoch: permute blocks, keep rows within a block.
+        """Row order for one epoch, from a generator seeded seed+epoch.
 
-        The recipe shuffles at block granularity with a generator seeded
-        seed+epoch, rather than permuting rows, so consecutive rows stay
-        together and only the block sequence varies between epochs.
+        shuffle_block_size <= 1 permutes rows; larger values permute blocks of
+        that many consecutive rows and keep each block's internal order.
+
+        Block shuffling exists to keep reads sequential when a split is streamed
+        from disk. This one is resident in device memory and indexed arbitrarily
+        at the same cost, so blocks buy nothing here and cost mixing: Ali-CCP is
+        ordered by user, and any contiguous 65,536-row run holds only ~1,268
+        distinct user bags against ~60,565 for a random draw of that size.
         """
+        g = torch.Generator(device=device).manual_seed(self.seed + epoch)
         bs = self.shuffle_block_size
+        if bs <= 1:
+            return torch.randperm(n, generator=g, device=device)
+
         n_blocks = (n + bs - 1) // bs
-        g = torch.Generator().manual_seed(self.seed + epoch)
-        order = torch.randperm(n_blocks, generator=g)
-        starts = order.to(torch.int64) * bs
-        lengths = torch.clamp(torch.full((n_blocks,), bs) - torch.clamp(starts + bs - n, min=0),
-                              min=0)
-        idx = torch.cat([torch.arange(s, s + l) for s, l in zip(starts.tolist(), lengths.tolist())])
-        return idx.to(device)
+        starts = torch.randperm(n_blocks, generator=g, device=device).to(torch.int64) * bs
+        idx = starts.unsqueeze(1) + torch.arange(bs, device=device).unsqueeze(0)
+        idx = idx.flatten()
+        return idx[idx < n]  # trailing block is short unless n divides evenly
 
     def _train_epoch_numpy(self, model, split_data, optimizer, epoch: int = 0) -> float:
         """One epoch over a SplitData in block-shuffled order; mean batch loss."""
@@ -335,34 +413,44 @@ class Trainer:
         No host->device transfer: the split already lives on self.device.
         """
         enc, y, z = split_data.get_batch(batch_idx)
-        if self.model_name == "esmm":
+        if self.model_name == "esmm_logged_pctr":
+            q, v = model(enc)
+            loss = model.loss(q, v, y, z, split_data.logged_pctr[batch_idx])
+        elif self.model_name == "esmm":
             from models.esmm import esmm_loss
             q, v = model(enc)
-            loss = esmm_loss(y, z, q, v)
+            loss = esmm_loss(y, z, q, v, model.aux_weight)
         else:
             from models.dcn import dcn_loss
             loss = dcn_loss(y, model(enc))
         loss.backward()
         return loss.item()
 
-    def _batch_scores(self, model, enc) -> dict:
-        """Named prediction columns for one encoded batch.
+    def _batch_scores(self, model, split_data, idx, enc) -> dict:
+        """Named prediction columns for one encoded batch of rows `idx`.
 
         A single-head model reports one score; ESMM reports its two heads
         separately, leaving any product to the consumer, so that a head can be
-        scored on its own population as well as inside a product.
+        scored on its own population as well as inside a product. An ESMM with no
+        auxiliary CTR head has no q. Unless evaluation.is_logged_ctcvr is off, the
+        split's logged pCTR is reported as p beside the heads.
         """
-        if self.model_name == "esmm":
+        if self.is_esmm:
             q, v = model(enc)
-            return {"q": q, "v": v}
+            scores = {"v": v} if q is None else {"q": q, "v": v}
+            if self.is_logged_ctcvr:
+                scores["p"] = split_data.logged_pctr[idx]
+            return scores
         return {"score": torch.sigmoid(model(enc))}
 
     def _selection_inputs(self, scores: dict, y, z) -> tuple:
         """(score, label) pair the configured checkpoint metric is computed on."""
         if self.checkpoint_metric == "ctr_prauc":
-            return (scores["q"] if self.model_name == "esmm" else scores["score"]), y
+            return (scores["q"] if self.is_esmm else scores["score"]), y
         if self.checkpoint_metric == "ctcvr_prauc":
             return scores["q"] * scores["v"], y * z
+        if self.checkpoint_metric == "logged_ctcvr_prauc":
+            return scores["p"] * scores["v"], y * z
         raise ValueError(f"Unknown checkpoint_metric: {self.checkpoint_metric!r}")
 
     def _predict_numpy(self, model, split_data) -> tuple:
@@ -382,7 +470,7 @@ class Trainer:
                 ids_out.append(split_data.sample_ids[idx].cpu())
                 ys_out.append(y.cpu())
                 zs_out.append(z.cpu())
-                for column, score in self._batch_scores(model, enc).items():
+                for column, score in self._batch_scores(model, split_data, idx, enc).items():
                     scores_out.setdefault(column, []).append(score.cpu())
         return (
             torch.cat(ids_out).numpy(),
@@ -391,15 +479,17 @@ class Trainer:
             {c: torch.cat(parts).numpy() for c, parts in scores_out.items()},
         )
 
-    def _val_score_numpy(self, model, val_split) -> float:
-        """Compute the validation checkpoint metric in batches.
+    def _val_score_numpy(self, model, val_split) -> tuple[float, dict]:
+        """The validation checkpoint metric, plus both CTCVR PR-AUCs for an ESMM model.
 
         Batched to bound activation memory. PR-AUC, not AUC: on these positive
-        rates it separates models that ROC-AUC ranks almost equally.
+        rates it separates models that ROC-AUC ranks almost equally. The extras
+        (q*v and logged p*v) are recorded whichever one selects, so the two
+        products can be followed over training; one missing its q or p is omitted.
         """
-        from evaluation.metrics import compute_metrics
+        from evaluation.metrics import pr_auc
         model.eval()
-        all_scores, all_labels = [], []
+        columns, ys, zs = {}, [], []
         eval_batch = self.eval_batch_size
         n = len(val_split)
         with torch.no_grad():
@@ -407,12 +497,22 @@ class Trainer:
                 idx = torch.arange(start, min(start + eval_batch, n),
                                    device=val_split.device)
                 enc, y, z = val_split.get_batch(idx)
-                score, label = self._selection_inputs(self._batch_scores(model, enc), y, z)
-                all_scores.append(score.cpu())
-                all_labels.append(label.cpu())
-        return compute_metrics(
-            torch.cat(all_scores).numpy(), torch.cat(all_labels).numpy()
-        )["pr_auc"]
+                for column, score in self._batch_scores(model, val_split, idx, enc).items():
+                    columns.setdefault(column, []).append(score.cpu())
+                ys.append(y.cpu())
+                zs.append(z.cpu())
+        scores = {c: torch.cat(parts) for c, parts in columns.items()}
+        y, z = torch.cat(ys), torch.cat(zs)
+
+        score, label = self._selection_inputs(scores, y, z)
+        extras = {}
+        if self.is_esmm:
+            ctcvr_label = (y * z).numpy()
+            if "q" in scores:
+                extras["val_ctcvr_prauc"] = pr_auc((scores["q"] * scores["v"]).numpy(), ctcvr_label)
+            if "p" in scores:
+                extras["val_ctcvr_logged_prauc"] = pr_auc((scores["p"] * scores["v"]).numpy(), ctcvr_label)
+        return pr_auc(score.numpy(), label.numpy()), extras
 
     # ------------------------------------------------------------------
     # Internal: forward + backward
@@ -444,6 +544,6 @@ class Trainer:
         y = torch.tensor([imp.y for imp in batch], dtype=torch.float32, device=device)
         z = torch.tensor([imp.z for imp in batch], dtype=torch.float32, device=device)
         q, v = model(enc)
-        loss = esmm_loss(y, z, q, v)
+        loss = esmm_loss(y, z, q, v, model.aux_weight)
         loss.backward()
         return loss.item()

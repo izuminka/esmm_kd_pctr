@@ -9,8 +9,12 @@ training:
   lr: 0.0005
   grad_clip_norm: 10  # dense gradients only; embedding updates are left unclipped
   seed: 42
-  shuffle_block_size: 65536  # epoch shuffling permutes blocks, not rows
+  shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
+                         # rows together, which on user-ordered data collapses
+                         # a batch to a few hundred distinct users
   checkpoint_metric: ctr_prauc  # paper: keep the best validation CTR PR-AUC
+  save_predictions: true   # its scores are the frozen logged pCTR p_i the ESMM
+                           # logged-pCTR arms consume
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
   load_test: false    # test + its common table are ~17 GB; holding them beside
                       # train, val and the optimizer state exceeds one 40 GB card.

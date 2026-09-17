@@ -6,13 +6,16 @@ Usage:
 Prerequisites:
     python scripts/preprocess.py --config configs/dcn.yaml  (run once)
 
-Orchestrates: load config → load encoded dataset → build model → fit.
-All training logic lives in training/trainer.py.
+Orchestrates: load config → start a run folder → load encoded dataset →
+build model → fit → export or score test → report metrics → update the pointers.
+All training logic lives in training/trainer.py; the run folder layout and
+pointer files are described in training/runs.py.
 """
 
 import argparse
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -25,6 +28,9 @@ _ROOT_DIR = os.path.dirname(_CODE_DIR)
 if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
+from data.logged_pctr import attach_logged_pctr
+from scripts.report_metrics import ESMM_MODELS
+from training import cohorts, runs
 from training.trainer import Trainer, resolve_device
 from training.dataset import NumpyDataset
 
@@ -49,6 +55,9 @@ def build_model(cfg: dict, vocab_sizes: dict):
     if cfg["model"] == "esmm":
         from models.esmm import ESMM
         return ESMM(vocab_sizes, **params)
+    if cfg["model"] == "esmm_logged_pctr":
+        from models.esmm_logged_pctr import LoggedPctrESMM
+        return LoggedPctrESMM(vocab_sizes, **params)
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 
 
@@ -58,20 +67,41 @@ def build_metric_fn(cfg: dict):
         return lambda model, enc, y: evaluate_dcn(model, enc, y)["ctr"]["auc"]
     if cfg["model"] == "esmm":
         from evaluation.esmm import evaluate_esmm
-        return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z)["ctcvr"]["pr_auc"]
+        return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z, is_logged_ctcvr=False)["ctcvr"]["pr_auc"]
+    if cfg["model"] == "esmm_logged_pctr":
+        return None  # encoded data path only, where the trainer scores validation itself
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 
 
 def main():
+    # SLURM cancellation and time limits send SIGTERM. Its default action ends the
+    # process without unwinding, which would leave the run marked RUNNING; raising
+    # SystemExit instead lets the handler below record it as FAILED.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+
     parser = argparse.ArgumentParser(description="Train a recommendation model on Ali-CCP.")
     parser.add_argument("--config", required=True, help="Path to YAML config (e.g. configs/dcn.yaml)")
+    parser.add_argument("--best-models", default=os.path.join(_CODE_DIR, "best_models.yaml"),
+                        help="git-tracked record of each model's best run")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    name = runs.run_name(args.config)
     logger.info(
-        "Config: model=%s  epochs=%d  batch_size=%d  lr=%s",
-        cfg["model"], cfg["training"]["epochs"], cfg["training"]["batch_size"], cfg["training"]["lr"],
+        "Config: %s  model=%s  epochs=%d  batch_size=%d  lr=%s",
+        name, cfg["model"], cfg["training"]["epochs"], cfg["training"]["batch_size"], cfg["training"]["lr"],
     )
+    # ESMM-based runs report CTCVR on the logged pCTR unless evaluation.is_logged_ctcvr
+    # turns it off; the logged-pCTR arms also train on it. Either way the source is named.
+    is_logged_ctcvr = cfg["model"] in ESMM_MODELS and cfg.get("evaluation", {}).get("is_logged_ctcvr", True)
+    is_logged_pctr_used = is_logged_ctcvr or cfg["model"] == "esmm_logged_pctr"
+    if is_logged_pctr_used and "logged_pctr" not in cfg:
+        raise ValueError(f"{args.config}: an {cfg['model']} config needs a logged_pctr block "
+                         "naming the DCN run and predictions files the logged pCTR comes from "
+                         "(or evaluation.is_logged_ctcvr: false for plain ESMM)")
+    if cfg["training"].get("checkpoint_metric") == "logged_ctcvr_prauc" and not is_logged_ctcvr:
+        raise ValueError(f"{args.config}: checkpoint_metric logged_ctcvr_prauc needs "
+                         "evaluation.is_logged_ctcvr on")
 
     encoded_dir = os.path.join(_ROOT_DIR, cfg["data"]["encoded_dir"])
     if not os.path.exists(encoded_dir):
@@ -80,37 +110,76 @@ def main():
             "Run: python scripts/preprocess.py --config <config>"
         )
 
-    device = resolve_device(cfg["training"].get("gpus", -1))
-    logger.info("Loading encoded dataset from %s onto %s...", encoded_dir, device)
-    t0 = time.perf_counter()
-    load_test = cfg["training"]["load_test"]
-    dataset = NumpyDataset.load(encoded_dir, device=device, load_test=load_test)
-    logger.info("Dataset ready in %.1fs  (train=%d, val=%d, test=%s)",
-                time.perf_counter() - t0, len(dataset.train), len(dataset.val),
-                len(dataset.test) if dataset.test is not None else "not loaded")
+    artifacts_root = os.path.join(_ROOT_DIR, cfg["training"]["out_dir"])
+    run_dir = runs.start_run(artifacts_root, cfg, args.config, _CODE_DIR, encoded_dir)
+    logger.info("Run folder: %s", run_dir)
 
-    model = build_model(cfg, dataset.vocab_sizes)
-    metric_fn = build_metric_fn(cfg)
-    trainer = Trainer(cfg, _ROOT_DIR)
+    try:
+        device = resolve_device(cfg["training"].get("gpus", -1))
+        logger.info("Loading encoded dataset from %s onto %s...", encoded_dir, device)
+        t0 = time.perf_counter()
+        load_test = cfg["training"]["load_test"]
+        dataset = NumpyDataset.load(encoded_dir, device=device, load_test=load_test)
+        logger.info("Dataset ready in %.1fs  (train=%d, val=%d, test=%s)",
+                    time.perf_counter() - t0, len(dataset.train), len(dataset.val),
+                    len(dataset.test) if dataset.test is not None else "not loaded")
 
-    checkpoint = trainer.fit(model, dataset, metric_fn)
-    logger.info("Checkpoint: %s", checkpoint)
+        logged_pctr_source = None
+        if is_logged_pctr_used:
+            logged_pctr_source = attach_logged_pctr(
+                cfg["logged_pctr"], _ROOT_DIR,
+                {"train": dataset.train, "val": dataset.val, "test": dataset.test})
+            runs.record_logged_pctr(run_dir, logged_pctr_source)
 
-    # Release the training state before touching the test split: together they
-    # exceed one card, which is why load_test defaults to false.
-    del dataset, model, trainer
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+        # After logged pCTR: its predictions file matches the full train split row for
+        # row, and the cohort reads it through restricted to the kept rows.
+        if "train_cohort" in cfg["data"]:
+            spec = cfg["data"]["train_cohort"]
+            dataset.train = cohorts.restrict(dataset.train, spec)
+            census = dataset.train.census()
+            runs.update_run(run_dir, train_cohort={**spec, **census})
+            logger.info("Train cohort: %d of %d rows (fraction %s, per-range %s)",
+                        census["n_rows"], len(dataset.train.split), spec["fraction"],
+                        census["rank_rows"])
 
-    if not load_test:
-        _run(["predict_encoded.py", "--config", args.config, "--split", "test"],
-             "Exporting test predictions")
-    _run(["report_metrics.py", "--config-model", cfg["model"],
-          "--artifacts", os.path.join(_ROOT_DIR, cfg["training"]["out_dir"]),
-          "--json-out", os.path.join(_ROOT_DIR, cfg["training"]["out_dir"],
-                                     f"metrics_{cfg['model']}.json")],
-         "Metrics (paper evaluation recipe)")
-    logger.info("Done.")
+        model = build_model(cfg, dataset.vocab_sizes)
+        metric_fn = build_metric_fn(cfg)
+        trainer = Trainer(cfg, _ROOT_DIR)
+        trainer.out_dir = run_dir
+        trainer.logged_pctr_source = logged_pctr_source
+        checkpoint_metric = trainer.checkpoint_metric
+        save_predictions = trainer.save_predictions
+
+        trainer.fit(model, dataset, metric_fn)
+
+        # Release the training state before touching the test split: together they
+        # exceed one card, which is why load_test defaults to false.
+        del dataset, model, trainer
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        if not load_test:
+            if save_predictions:
+                _run(["predict_encoded.py", "--config", args.config, "--split", "test",
+                      "--run-dir", run_dir], "Exporting test predictions")
+            else:
+                _run(["predict_encoded.py", "--config", args.config, "--split", "test",
+                      "--run-dir", run_dir, "--metrics-only"], "Scoring test")
+        _run(["report_metrics.py", "--model", cfg["model"], "--run-dir", run_dir],
+             "Metrics (paper evaluation recipe)")
+    except BaseException as exc:
+        runs.finish_run(run_dir, runs.FAILED, error=f"{type(exc).__name__}: {exc}")
+        raise
+
+    run = runs.finish_run(run_dir, runs.FINISHED,
+                          selected_on=runs.selection(run_dir, checkpoint_metric),
+                          test=runs.read_test_metrics(run_dir))
+    runs.update_latest(artifacts_root, name, run_dir)
+    if runs.update_best(args.best_models, name, runs.best_entry(run)):
+        logger.info("New best %s run (%s %.6f); %s updated -- review and commit.",
+                    name, checkpoint_metric, run["selected_on"]["value"],
+                    args.best_models)
+    logger.info("Done. %s is now latest.", run["run"])
 
 
 def _run(script_args: list, banner: str) -> None:

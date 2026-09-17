@@ -6,102 +6,17 @@ batch.  The thing that must hold is that the model sees exactly what it saw when
 the join was materialised per row, so these tests compare get_batch() against
 data.vocab.encode_batch() over the same impressions.
 
-A fixture is carved out of the real extracted CSVs rather than synthesised: the
-delimiter nesting, the skeleton/common split and the ragged field layout are
-exactly the things a synthetic fixture would paper over.
+The `encoded` fixture (tests/conftest.py) is carved from the real extracted CSVs.
 """
 
 import os
 import pickle
-import subprocess
-import sys
 
-import pytest
 import torch
-import yaml
 
-_CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_ROOT_DIR = os.path.dirname(_CODE_DIR)
-_CSV_DIR = os.path.join(_ROOT_DIR, "ali-ccp", "extracted")
-
-if _CODE_DIR not in sys.path:
-    sys.path.insert(0, _CODE_DIR)
-
-from data.raw import is_validation, iter_impressions_from_csv  # noqa: E402
-from data.vocab import encode_batch  # noqa: E402
-from training.dataset import NumpyDataset  # noqa: E402
-
-_N_BAGS = 4000       # common_features rows to copy into the fixture
-_N_ROWS = 400        # skeleton rows (that reference those bags) to keep
-_SCAN_LIMIT = 400_000  # skeleton lines to scan looking for matches
-
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(os.path.join(_CSV_DIR, "common_features_train.csv")),
-    reason="extracted Ali-CCP CSVs not present",
-)
-
-
-def _carve_split(csv_dir: str, split: str, out_dir: str) -> int:
-    """Copy a small but *self-consistent* slice of one split into out_dir.
-
-    Head-of-file slices of the two files barely intersect (the skeleton
-    references bags scattered through common_features), so take the bags first
-    and then keep only skeleton rows pointing at them.
-    """
-    cf_src = os.path.join(csv_dir, f"common_features_{split}.csv")
-    sk_src = os.path.join(csv_dir, f"sample_skeleton_{split}.csv")
-
-    kept_idx = set()
-    with open(cf_src, encoding="utf-8") as fin, \
-         open(os.path.join(out_dir, f"common_features_{split}.csv"), "w", encoding="utf-8") as fout:
-        for i, line in enumerate(fin):
-            if i >= _N_BAGS:
-                break
-            kept_idx.add(line.split(",", 1)[0])
-            fout.write(line)
-
-    n = 0
-    with open(sk_src, encoding="utf-8") as fin, \
-         open(os.path.join(out_dir, f"sample_skeleton_{split}.csv"), "w", encoding="utf-8") as fout:
-        for i, line in enumerate(fin):
-            if n >= _N_ROWS or i >= _SCAN_LIMIT:
-                break
-            parts = line.split(",", 5)
-            if len(parts) == 6 and parts[3] in kept_idx and int(parts[2]) <= int(parts[1]):
-                fout.write(line)
-                n += 1
-    return n
-
-
-@pytest.fixture(scope="module")
-def encoded(tmp_path_factory):
-    """Run the real preprocess.py over a fixture carved from the real CSVs."""
-    base = tmp_path_factory.mktemp("alliccp")
-    csv_dir = base / "csv"
-    csv_dir.mkdir()
-    enc_dir = base / "encoded"
-
-    n_train = _carve_split(_CSV_DIR, "train", str(csv_dir))
-    n_test = _carve_split(_CSV_DIR, "test", str(csv_dir))
-    if n_train < 50 or n_test < 10:
-        pytest.skip(f"too few joinable rows in fixture (train={n_train}, test={n_test})")
-
-    cfg_path = base / "cfg.yaml"
-    cfg_path.write_text(yaml.safe_dump({
-        "model": "dcn",
-        "training": {"epochs": 1, "batch_size": 64,
-                     "eval_batch_size": 128, "lr": 1e-3, "grad_clip_norm": 0,
-                     "shuffle_block_size": 128,
-                     "gpus": 0, "out_dir": str(base / "artifacts")},
-        "data": {"csv_dir": str(csv_dir), "encoded_dir": str(enc_dir)},
-    }))
-
-    subprocess.run(
-        [sys.executable, os.path.join(_CODE_DIR, "scripts", "preprocess.py"),
-         "--config", str(cfg_path)],
-        check=True, cwd=_CODE_DIR, capture_output=True, text=True, timeout=900,
-    )
-    return str(enc_dir), str(csv_dir), n_train
+from data.raw import is_validation, iter_impressions_from_csv
+from data.vocab import encode_batch
+from training.dataset import NumpyDataset
 
 
 def _bags(encoded_field, n_rows):
@@ -216,9 +131,12 @@ def test_trains_end_to_end(encoded, tmp_path):
     trainer = Trainer(cfg, root_dir="/")
     ckpt_path = trainer.fit(model, ds, metric_fn=None)
 
-    assert os.path.exists(ckpt_path)
+    assert ckpt_path == os.path.join(out, "best.pt") and os.path.exists(ckpt_path)
+    with open(os.path.join(out, "history.csv")) as f:
+        assert f.readline().strip() == "epoch,loss,val_score,seconds,saved"
+        assert len(f.readlines()) == 1  # one epoch
     for split, n in [("train", len(ds.train)), ("val", len(ds.val)), ("test", len(ds.test))]:
-        df = pd.read_parquet(os.path.join(out, f"predictions_{split}.parquet"))
+        df = pd.read_parquet(os.path.join(out, "predictions", f"{split}.parquet"))
         assert list(df.columns) == ["sample_id", "y", "z", "score"]
         assert len(df) == n
         assert df["score"].between(0.0, 1.0).all()

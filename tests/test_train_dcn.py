@@ -62,7 +62,7 @@ def artifacts(tmp_path_factory):
 
 
 def test_checkpoint_keys(artifacts):
-    ckpt = torch.load(os.path.join(artifacts, "dcn_model.pt"), weights_only=False)
+    ckpt = torch.load(os.path.join(artifacts, "best.pt"), weights_only=False)
     assert set(ckpt.keys()) == {"model_type", "model_state_dict", "vocabs", "field_ids", "vocab_sizes", "split_rule"}
     assert ckpt["model_type"] == "dcn"
     assert len(ckpt["field_ids"]) > 0
@@ -71,8 +71,8 @@ def test_checkpoint_keys(artifacts):
 
 @pytest.mark.parametrize("split", ["train", "val", "test"])
 def test_predictions_schema_and_range(artifacts, split):
-    path = os.path.join(artifacts, f"predictions_{split}.parquet")
-    assert os.path.exists(path), f"missing predictions_{split}.parquet"
+    path = os.path.join(artifacts, "predictions", f"{split}.parquet")
+    assert os.path.exists(path), f"missing predictions/{split}.parquet"
     df = pd.read_parquet(path)
     assert list(df.columns) == ["sample_id", "y", "z", "score"]
     assert df["score"].dtype == "float32"
@@ -81,7 +81,7 @@ def test_predictions_schema_and_range(artifacts, split):
 
 
 def test_train_val_sizes_match_80_20_split(artifacts):
-    n_train = len(pd.read_parquet(os.path.join(artifacts, "predictions_train.parquet")))
-    n_val = len(pd.read_parquet(os.path.join(artifacts, "predictions_val.parquet")))
+    n_train = len(pd.read_parquet(os.path.join(artifacts, "predictions", "train.parquet")))
+    n_val = len(pd.read_parquet(os.path.join(artifacts, "predictions", "val.parquet")))
     total = n_train + n_val
     assert abs(n_train / total - 0.8) < 0.05

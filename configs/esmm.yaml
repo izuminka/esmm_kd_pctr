@@ -7,9 +7,12 @@ training:
   lr: 0.001           # paper's ESMM learning rate
   grad_clip_norm: 0   # paper: ESMM uses no gradient clipping
   seed: 42
-  shuffle_block_size: 65536  # epoch shuffling permutes blocks, not rows
+  shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
+                         # rows together, which on user-ordered data collapses
+                         # a batch to a few hundred distinct users
   checkpoint_metric: ctcvr_prauc  # paper: full/half keep the best validation
                                   # native CTCVR (q*v) PR-AUC
+  save_predictions: false  # score train/val/test in memory; write metrics only
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
   load_test: false    # test + its common table are ~17 GB; holding them beside
                       # train, val and the optimizer state exceeds one 40 GB card.
@@ -22,6 +25,20 @@ training:
 model_params:
   emb_dim: 20
   tower_dims: [460, 360, 200, 80, 2]
+  aux_weight: 1.0  # weight on the CTR term; 1 is the canonical ESMM loss
+
+# Frozen DCN-V2 pCTR p, used only to report CTCVR-logged (p * v) beside CTCVR (q * v);
+# it is not a model input and not in this model's loss.
+logged_pctr:
+  dcn_run: artifacts/dcn/20260916T232126Z  # the dcn entry in best_models.yaml
+  predictions:  # one file per split, inside dcn_run; joined to rows by sample_id
+    train: artifacts/dcn/20260916T232126Z/predictions/train.parquet
+    val: artifacts/dcn/20260916T232126Z/predictions/val.parquet
+    test: artifacts/dcn/20260916T232126Z/predictions/test.parquet
+  score_column: score
+
+evaluation:
+  is_logged_ctcvr: true  # also report CTCVR-logged (p * v) beside CTCVR (q * v)
 
 data:
   # paths relative to project root

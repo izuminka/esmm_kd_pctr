@@ -1,9 +1,9 @@
 """Export predictions from a saved checkpoint to Parquet.
 
 Usage:
-    python scripts/predict.py --checkpoint artifacts/dcn_model.pt --split train
-    python scripts/predict.py --checkpoint artifacts/dcn_model.pt --split test \\
-        --out artifacts/predictions_test.parquet
+    python scripts/predict.py --checkpoint artifacts/dcn/20260916T020356Z/best.pt --split train
+    python scripts/predict.py --checkpoint artifacts/dcn/20260916T020356Z/best.pt --split test \\
+        --out /tmp/predictions_test.parquet
 """
 
 import argparse
@@ -52,14 +52,16 @@ def main():
     parser = argparse.ArgumentParser(description="Export model predictions to Parquet.")
     parser.add_argument("--checkpoint", required=True, help="Path to .pt checkpoint")
     parser.add_argument("--split", default="train", choices=["train", "val", "test"])
-    parser.add_argument("--out", default=None, help="Output .parquet path (default: next to checkpoint)")
+    parser.add_argument("--out", default=None,
+                        help="Output .parquet path (default: <checkpoint dir>/predictions/<split>.parquet)")
     parser.add_argument("--data-dir", default=os.path.join(_ROOT_DIR, "ali-ccp"),
                         help="Directory containing sample_{train,test}.tar.gz")
     args = parser.parse_args()
 
     out_path = args.out or os.path.join(
-        os.path.dirname(args.checkpoint), f"predictions_{args.split}.parquet"
+        os.path.dirname(args.checkpoint), "predictions", f"{args.split}.parquet"
     )
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
     model, ckpt = _load_checkpoint(args.checkpoint)
 

@@ -92,6 +92,9 @@ def main():
     parser.add_argument("--best-models", default=os.path.join(_CODE_DIR, "best_models.yaml"),
                         help="git-tracked record of each model's best run")
     args = parser.parse_args()
+    # Prediction subprocesses run from code/, which may differ from the caller's
+    # cwd. Resolve the config before passing it across that directory boundary.
+    args.config = os.path.abspath(args.config)
 
     cfg = load_config(args.config)
     name = runs.run_name(args.config)

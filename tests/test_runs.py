@@ -262,8 +262,8 @@ def _train(cfg: dict, tmp_path, name: str, best_file: str) -> subprocess.Complet
     cfg_path = tmp_path / name / f"{cfg['model']}.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg))
     return subprocess.run([sys.executable, os.path.join(CODE_DIR, "scripts", "train.py"),
-                           "--config", str(cfg_path), "--best-models", best_file],
-                          cwd=CODE_DIR, capture_output=True, text=True, timeout=900)
+                           "--config", str(cfg_path.relative_to(tmp_path)), "--best-models", best_file],
+                          cwd=tmp_path, capture_output=True, text=True, timeout=900)
 
 
 def _small_dcn_cfg(encoded_dir, artifacts, epochs=1):

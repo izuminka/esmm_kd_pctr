@@ -21,8 +21,14 @@ import torch
 from evaluation.metrics import compute_metrics
 
 
-def evaluate_esmm(model, batch, y: torch.Tensor, z: torch.Tensor,
-                  p: torch.Tensor | None = None, is_logged_ctcvr: bool = True) -> dict:
+def evaluate_esmm(
+    model,                              # an ESMM whose forward returns (q, v)
+    batch,                              # encoded features, as from data.vocab.encode_batch
+    y: torch.Tensor,                    # click label
+    z: torch.Tensor,                    # conversion label; y*z is the CTCVR label
+    p: torch.Tensor | None = None,      # frozen logged pCTR, needed for logged CTCVR
+    is_logged_ctcvr: bool = True,       # also score the logged product p * v
+) -> dict:
     if is_logged_ctcvr and p is None:
         raise ValueError("logged CTCVR needs the logged pCTR p; pass p, or is_logged_ctcvr=False")
 

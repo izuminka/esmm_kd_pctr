@@ -82,8 +82,13 @@ class ESMM(nn.Module):
         return q, v
 
 
-def esmm_loss(y: torch.Tensor, z: torch.Tensor, q: torch.Tensor, v: torch.Tensor,
-              aux_weight: float = 1.0) -> torch.Tensor:
+def esmm_loss(
+    y: torch.Tensor,          # click label
+    z: torch.Tensor,          # conversion label; y*z is the CTCVR label
+    q: torch.Tensor,          # auxiliary pCTR head
+    v: torch.Tensor,          # pCVR head
+    aux_weight: float = 1.0,  # weight on the CTR term; 1 is the canonical loss
+) -> torch.Tensor:
     """L_ESMM = mean[ aux_weight * BCE(y, q) + BCE(y*z, q*v) ], eps-clipped for stability."""
     q = q.clamp(EPS, 1 - EPS)
     qv = (q * v).clamp(EPS, 1 - EPS)

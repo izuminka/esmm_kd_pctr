@@ -124,6 +124,9 @@ class DCNv2(nn.Module):
         return logit
 
 
-def dcn_loss(y: torch.Tensor, logit: torch.Tensor) -> torch.Tensor:
+def dcn_loss(
+    y: torch.Tensor,      # click label
+    logit: torch.Tensor,  # the model's raw CTR logit, before the sigmoid
+) -> torch.Tensor:
     """L_DCN = mean[ BCE-with-logits(y, logit) ], click-only, no class weighting."""
     return F.binary_cross_entropy_with_logits(logit, y)

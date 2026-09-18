@@ -75,3 +75,26 @@ def test_report_rejects_invalid_study_results(study, problem):
     with pytest.raises(ValueError, match=message):
         report(study_dir, root)
     assert not (study_dir / "comparison.csv").exists()
+
+
+@pytest.mark.parametrize('metric', ['ctr_ne', 'ctcvr_ne', 'logged_ctcvr_ne', 'logged_ctcvr_prauc'])
+def test_report_checks_selection_direction_and_retains_first_tie(study, metric):
+    study_dir, root = study
+    path = study_dir / 'submission.json'
+    manifest = json.loads(path.read_text())
+    manifest['checkpoint_metric'] = metric
+    path.write_text(json.dumps(manifest))
+    values = (1.2, .8, .8) if metric.endswith('_ne') else (.2, .4, .4)
+    for job in manifest['jobs']:
+        run_dir = root / 'artifacts' / job['arm'] / 'r1'
+        run_path = run_dir / 'run.json'
+        run = json.loads(run_path.read_text())
+        run['selected_on']['metric'] = metric
+        run_path.write_text(json.dumps(run))
+        (run_dir / 'history.csv').write_text('epoch,val_score\n' + ''.join(
+            f'{epoch},{value}\n' for epoch, value in enumerate(values, 1)))
+    report(study_dir, root)
+    run['selected_on']['epoch'] = 3
+    run_path.write_text(json.dumps(run))
+    with pytest.raises(ValueError, match='does not optimize'):
+        report(study_dir, root)

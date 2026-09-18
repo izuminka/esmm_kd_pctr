@@ -1,6 +1,20 @@
 # DCN versus ESMM CTR: validation study
 
-## Acceptance criterion
+## Final selection
+
+Exploration was stopped at the user's request. The frozen winner is
+`dcn_matched_stats_wd3e6/20260917T232959Z`, epoch 2, selected by validation NE
+0.944234032 before final test evaluation. Slurm job 449 evaluated it on all
+43,016,614 test impressions: AUC 0.626777878, PR-AUC 0.063271899,
+NE 0.987689227, and calibration ratio 1.238884620. The main paper's DCN row
+uses these results. Test results will not trigger further tuning.
+
+Job 450 exported its test predictions; array 451 reuses the existing full,
+half, and third ESMM checkpoints to recompute logged CTCVR only. It does not
+train any model. Separate evaluation folders preserve the original runs and
+record the new pCTR source, checkpoint hashes, and native-metric invariance.
+
+## Original exploration target
 
 The requested improvement is **at least 0.5% lower validation CTR normalized
 entropy (NE)** than the ESMM CTR tower. This means
@@ -57,7 +71,8 @@ target remains unmet. Both intermediate settings worsen after epoch 2.
 Both runs are FINISHED, and their restored-checkpoint validation NE agrees
 with the selection score within 1e-6. The 3e-6 model has validation ROC-AUC
 0.693054029, PR-AUC 0.087550186, NE 0.944234018, and calibration ratio
-1.016065975. Neither run contains a test prediction artifact or test metrics.
+1.016065975. Neither run evaluated test during tuning; the selected 3e-6 run
+was evaluated on test only after exploration was stopped, as recorded above.
 
 Training loss continues to decrease while validation NE deteriorates after
 epoch 1 in the lightly regularized runs. For seed 42, weight decay 1e-6 gives
@@ -65,17 +80,18 @@ validation NE 0.94490, 0.94647, 0.97326, 1.08168, 1.26618 over five epochs.
 This supports overfitting as a remaining issue. Stronger weight decay 1e-4
 reduces that deterioration but gives a worse best validation result.
 
-## Experiments in flight
+## Closing experiment status
 
-- Slurm 446 finished five training epochs and is exporting the selected
+- Slurm 446 finished five training epochs and verified the restored
   checkpoint. Its stacked structure improved on parallel at weight decay 1e-6,
   but did not beat the parallel 3e-6 model. Validation NE reached 1.5090 by
   epoch 5, despite falling training BCE, so overfitting remains.
-- Slurm 447: 64-dimensional embeddings with weight decay 3e-6. Only embedding
+- Slurm 447 was cancelled when the user stopped exploration: 64-dimensional
+  embeddings with weight decay 3e-6. Only embedding
   width changes from job 444; the raw inputs and evaluation population remain
   fixed. This tests additional capacity under regularization, not equality of
   model parameter counts with ESMM.
-- Slurm 448, after 446: embedding learning rate 1e-4, dense learning rate
+- Slurm 448 was also cancelled: embedding learning rate 1e-4, dense learning rate
   unchanged at 5e-4, otherwise identical to the best parallel 3e-6 recipe.
   The hypothesis is that slower embedding updates reduce memorization while
   preserving the dense network's learning rate. The option is DCN-only and

@@ -3,29 +3,31 @@
 # Checkpoint paths are relative to the artifacts root. Test metrics are recorded
 # for reference and never used for ranking.
 dcn:
-  run: 20260916T232126Z
-  checkpoint: dcn/20260916T232126Z/best.pt
+  run: 20260917T232959Z
+  checkpoint: dcn_matched_stats_wd3e6/20260917T232959Z/best.pt
   selected_on:
-    metric: ctr_prauc
+    metric: ctr_ne
     split: val
-    value: 0.08578843645709917
-    epoch: 1
+    value: 0.9442340315513503
+    epoch: 2
   test:
     CTR:
-      auc: 0.6167969914028244
-      pr_auc: 0.06045315277067072
-      ne: 0.9906854095604245
-      ce: 1.2622810880774833
+      auc: 0.6267778782545077
+      pr_auc: 0.06327189860446197
+      ne: 0.9876892268294688
+      ce: 1.2388846195905816
   trained_from:
-    commit: 935a5897c785effb6ae31232c49d9415d330b502
+    commit: a055d9a137168a4f00ffe5c668fb76b3ea312b2c
     dirty: true
     untracked:
-    - best_models.yaml
-    - models/esmm_logged_pctr.py
-    - tests/conftest.py
-    - tests/test_esmm_logged_pctr.py
-    - tests/test_runs.py
-    - training/runs.py
+    - configs/dcn_matched_stats_no_cross.yaml
+    - configs/dcn_matched_stats_wd1e4.yaml
+    - configs/dcn_matched_stats_wd1e5.yaml
+    - configs/dcn_matched_stats_wd1e6.yaml
+    - configs/dcn_matched_stats_wd1e6_seed43.yaml
+    - configs/dcn_matched_stats_wd1e6_stacked.yaml
+    - configs/dcn_matched_stats_wd3e6.yaml
+    - configs/esmm_ctr_reference_seed43.yaml
   data:
     train:
       n_rows: 38070359
@@ -39,7 +41,7 @@ dcn:
       n_rows: 43016614
       n_clicks: 1673447
       n_conversions: 9195
-  finished_at: '2026-09-16T23:36:16Z'
+  finished_at: '2026-09-17T23:37:45Z'
 esmm:
   run: 20260917T195622Z
   checkpoint: esmm/20260917T195622Z/best.pt
@@ -285,3 +287,41 @@ esmm_quarter:
     - 2379397
     - 2379397
     - 2379397
+dcn_logged_reference:
+  run: 20260916T232126Z
+  checkpoint: dcn/20260916T232126Z/best.pt
+  selected_on:
+    metric: ctr_prauc
+    split: val
+    value: 0.08578843645709917
+    epoch: 1
+  test:
+    CTR:
+      auc: 0.6167969914028244
+      pr_auc: 0.06045315277067072
+      ne: 0.9906854095604245
+      ce: 1.2622810880774833
+  trained_from:
+    commit: 935a5897c785effb6ae31232c49d9415d330b502
+    dirty: true
+    untracked:
+    - best_models.yaml
+    - models/esmm_logged_pctr.py
+    - tests/conftest.py
+    - tests/test_esmm_logged_pctr.py
+    - tests/test_runs.py
+    - training/runs.py
+  data:
+    train:
+      n_rows: 38070359
+      n_clicks: 1479954
+      n_conversions: 7927
+    val:
+      n_rows: 4229546
+      n_clicks: 164302
+      n_conversions: 875
+    test:
+      n_rows: 43016614
+      n_clicks: 1673447
+      n_conversions: 9195
+  finished_at: '2026-09-16T23:36:16Z'

@@ -1,6 +1,6 @@
 # KD-teacher: the auxiliary CTR head learns only from the logged-pCTR teacher.
 # One arm of the logged-pCTR suite (paper Table 2, tab:aliccp-quarter-logged-pctr).
-# Trains on the full train split: the paper's fixed quarter cohort is not built yet.
+# This run uses the full training split.
 model: esmm_logged_pctr
 
 training:
@@ -13,14 +13,16 @@ training:
   shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
                          # rows together, which on user-ordered data collapses
                          # a batch to a few hundred distinct users
-  checkpoint_metric: logged_ctcvr_prauc  # KD validates on the logged product p*v
+  checkpoint_metric: logged_ctcvr_ne  # minimize validation NE of the logged product p*v
   save_predictions: false  # score train/val/test in memory; write metrics only
-  gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
+  gpus: 1            # one GPU per Slurm task
   load_test: false    # test + its common table are ~17 GB; holding them beside
                       # train, val and the optimizer state exceeds one 40 GB card.
                       # scripts/predict_encoded.py exports test afterwards.
   out_dir: artifacts  # relative to project root (parent of code/)
+  keep_checkpoint: best
   early_stopping:
+    enabled: false   # complete all five epochs
     patience: 2       # paper: patience two, zero minimum delta
     min_delta: 0.0
 
@@ -34,11 +36,11 @@ model_params:
 # Frozen DCN-V2 pCTR p: detached and never a model input. It enters the loss as
 # described above and is reported as CTCVR-logged (p * v).
 logged_pctr:
-  dcn_run: artifacts/dcn/20260916T232126Z  # the dcn entry in best_models.yaml
+  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z  # frozen validation-NE winner
   predictions:  # only required splits; joined by sample_id
-    train: artifacts/dcn/20260916T232126Z/predictions/train.parquet
-    val: artifacts/dcn/20260916T232126Z/predictions/val.parquet
-    test: artifacts/dcn/20260916T232126Z/predictions/test.parquet
+    train: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/train.parquet
+    val: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/val.parquet
+    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
   score_column: score
 
 evaluation:

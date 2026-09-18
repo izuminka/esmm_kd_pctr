@@ -85,6 +85,7 @@ def build_metric_fn(cfg: dict):
             "ctr_ne": ("ctr", "ne"),
             "ctr_prauc": ("ctr", "pr_auc"),
             "ctcvr_prauc": ("ctcvr", "pr_auc"),
+            "ctcvr_ne": ("ctcvr", "ne"),
         }[metric_name]
         return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z, is_logged_ctcvr=False)[population][metric]
     if cfg["model"] in ("esmm_logged_pctr", "cnn_attention"):
@@ -122,8 +123,8 @@ def main():
         raise ValueError(f"{args.config}: an {cfg['model']} config needs a logged_pctr block "
                          "naming the DCN run and predictions files the logged pCTR comes from "
                          "(or evaluation.is_logged_ctcvr: false for plain ESMM)")
-    if cfg["training"].get("checkpoint_metric") == "logged_ctcvr_prauc" and "val" not in logged_splits:
-        raise ValueError("checkpoint_metric logged_ctcvr_prauc requires esmm_logged_pctr: "
+    if cfg["training"].get("checkpoint_metric") in ("logged_ctcvr_prauc", "logged_ctcvr_ne") and "val" not in logged_splits:
+        raise ValueError("logged CTCVR checkpoint selection requires esmm_logged_pctr: "
                          "native ESMM validates on q*v")
 
     encoded_dir = os.path.join(_ROOT_DIR, cfg["data"]["encoded_dir"])

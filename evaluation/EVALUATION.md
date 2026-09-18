@@ -1,19 +1,20 @@
 # ESMM evaluation protocol
 
 `configs/esmm.yaml`, `esmm_half.yaml`, `esmm_third.yaml`, and `esmm_quarter.yaml` use the same
-training and evaluation settings. Only `data.train_cohort` differs. The quarter
+training and selection settings. `data.train_cohort` differs, and the historical
+quarter config retains its original test-only DCN teacher. The quarter
 cohort is nested in half; validation and test always use their full populations.
 
 | Model | Conversion score in training | Validation selection | Logged pCTR files needed |
 | --- | --- | --- | --- |
-| ESMM full / half / third / quarter | `q*v` | Lowest clicked-pCVR NE (`v`, `y == 1`) | Test |
-| Logged-pCTR KD / teacher variants | `q*v`; `p` supplies the CTR soft target | Logged CTCVR PR-AUC (`p*v`) | Train, validation, test |
+| ESMM full / half / third / quarter | `q*v` | Lowest native CTCVR NE (`q*v`, all impressions) | Test |
+| Logged-pCTR KD / teacher variants | `q*v`; `p` supplies the CTR soft target | Lowest logged CTCVR NE (`p*v`); legacy 2x-aux configs retain PR-AUC | Train, validation, test |
 | Logged-pCTR product-only | `p*v` | Logged CTCVR PR-AUC (`p*v`) | Train, validation, test |
 
 Logged-score models (KD, teacher, and product-only) validate and select on `p*v`.
 For KD this is an explicit selection rule; its training conversion loss still
 uses `q*v`. Native ESMM models neither load nor use validation logged pCTR. The
-pipeline rejects `logged_ctcvr_prauc` selection for native ESMM. Train reports do not
+pipeline rejects `logged_ctcvr_prauc` and `logged_ctcvr_ne` selection for native ESMM. Train reports do not
 include `p*v`; test reports include it when `evaluation.is_logged_ctcvr` is true.
 Turning that flag off does not remove logged-model validation: KD and product-only
 still require validation logged scores for checkpoint selection.
@@ -23,8 +24,9 @@ For the matched ESMM cohort controls:
 - Seed Python, NumPy, and Torch with `training.seed` before constructing the
   model. All controls use seed 42 and the same vocabulary and architecture.
   GPU kernels are not forced to be deterministic.
-- Validate after every epoch; minimize clicked-validation pCVR normalized
-  entropy (`pcvr_ne`). NE is recorded as a positive loss, with lower better.
+- Validate after every epoch; minimize native CTCVR normalized entropy
+  (`ctcvr_ne`) on `q*v` against `y*z` over all validation impressions.
+  NE is recorded as a positive loss, with lower better.
 - Train for exactly five epochs with early stopping disabled. Retain the
   strictly lowest NE (`min_delta: 0.0`); ties retain the earlier checkpoint.
 - Restore the best checkpoint before reporting any final split metrics.

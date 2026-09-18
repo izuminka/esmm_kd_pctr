@@ -21,8 +21,14 @@ def test_matched_cohort_arms_differ_only_in_training_cohort():
                            ("esmm_quarter", .25)):
         cfg = load_config(CONFIGS / f"{name}.yaml")
         assert cfg["data"].pop("train_cohort")["fraction"] == fraction
-        assert cfg == full
-    assert full["training"]["checkpoint_metric"] == "pcvr_ne"
+        if name == "esmm_quarter":
+            # Historical quarter config retains its original test-only teacher.
+            # The current full/half/third study shares the newly frozen DCN.
+            assert {k: v for k, v in cfg.items() if k != "logged_pctr"} == {
+                k: v for k, v in full.items() if k != "logged_pctr"}
+        else:
+            assert cfg == full
+    assert full["training"]["checkpoint_metric"] == "ctcvr_ne"
     assert full["training"]["keep_checkpoint"] == "best"
     assert full["training"]["early_stopping"] == {"enabled": False, "patience": 2, "min_delta": 0.0}
     assert set(full["logged_pctr"]["predictions"]) == {"test"}
@@ -32,14 +38,14 @@ def test_matched_cohort_arms_differ_only_in_training_cohort():
 def test_native_and_logged_configs_use_their_prescribed_validation_score(config):
     cfg = load_config(config)
     logged = cfg["model"] == "esmm_logged_pctr"
-    native_metric = "pcvr_ne" if config.stem in {
-        "esmm", "esmm_half", "esmm_third", "esmm_quarter"
-    } else "ctcvr_prauc"
+    native_metric = "ctcvr_ne"
     if config.stem.startswith("esmm_ctr_reference_"):
         native_metric = "ctr_ne"
         assert cfg["training"]["evaluate_test"] is False
         assert cfg["training"]["load_test"] is False
-    assert cfg["training"]["checkpoint_metric"] == ("logged_ctcvr_prauc" if logged else native_metric)
+    kd_ne = config.stem.startswith(("esmm_logged_pctr_kd_teacher", "esmm_logged_pctr_kd05", "esmm_logged_pctr_kd03", "esmm_logged_pctr_kd07")) and "2x_aux" not in config.stem
+    logged_metric = "logged_ctcvr_ne" if kd_ne else "logged_ctcvr_prauc"
+    assert cfg["training"]["checkpoint_metric"] == (logged_metric if logged else native_metric)
     assert ("val" in logged_ctcvr_splits(cfg)) == logged
     assert "train" not in logged_ctcvr_splits(cfg)
 
@@ -78,7 +84,7 @@ class TinySplit:
         return {"f": (idx + 1, torch.ones(len(idx)), torch.arange(len(idx)))}, self.ys[idx].float(), self.zs[idx].float()
 
 
-@pytest.mark.parametrize("metric", ["ctr_ne", "ctr_prauc", "pcvr_ne", "ctcvr_prauc"])
+@pytest.mark.parametrize("metric", ["ctr_ne", "ctr_prauc", "pcvr_ne", "ctcvr_prauc", "ctcvr_ne"])
 def test_legacy_and_encoded_esmm_selection_agree(tmp_path, metric):
     cfg = tiny_cfg(tmp_path)
     cfg["training"]["checkpoint_metric"] = metric
@@ -91,15 +97,16 @@ def test_legacy_and_encoded_esmm_selection_agree(tmp_path, metric):
     assert legacy == pytest.approx(encoded, abs=1e-6)
 
 
+@pytest.mark.parametrize("selection", ["logged_ctcvr_prauc", "logged_ctcvr_ne"])
 @pytest.mark.parametrize("objective", [None, "kd", "product"])
-def test_validation_and_export_use_only_allowed_logged_scores(tmp_path, objective):
+def test_validation_and_export_use_only_allowed_logged_scores(tmp_path, objective, selection):
     cfg = tiny_cfg(tmp_path)
     if objective:
         cfg["model"] = "esmm_logged_pctr"
         cfg["model_params"]["objective"] = objective
         if objective == "kd":
             cfg["model_params"].update(alpha=.5, aux_weight=1.)
-        cfg["training"]["checkpoint_metric"] = "logged_ctcvr_prauc"
+        cfg["training"]["checkpoint_metric"] = selection
     split = TinySplit()
     # Any accidental use of p during native validation will fail metrics.
     split.logged_pctr = torch.full((8,), float("nan"))
@@ -111,8 +118,8 @@ def test_validation_and_export_use_only_allowed_logged_scores(tmp_path, objectiv
     _, y, z, scores = trainer._predict_numpy(model, split, split_name="val")
     assert ("p" in scores) == (objective is not None)
     expected = {r["population"]: r for r in metric_rows("val", cfg["model"], y.astype("int8"), z.astype("int8"), scores)}
-    population = "CTCVR-logged" if objective is not None else "pCVR"
-    assert score == expected[population]["pr_auc" if objective else "ne"]
+    population = "CTCVR-logged" if objective is not None else "CTCVR"
+    assert score == pytest.approx(expected[population]["pr_auc" if objective and selection.endswith("prauc") else "ne"], abs=1e-6)
     assert extras["val_pcvr_ne"] == pytest.approx(expected["pCVR"]["ne"])
     assert any("logged" in c for c in extras) == (objective is not None)
     _, _, _, train_scores = trainer._predict_numpy(model, split, split_name="train")
@@ -144,7 +151,7 @@ def test_native_fit_with_loaded_test_needs_only_test_logged_scores(tmp_path):
         assert any(r["population"] == "CTCVR-logged" for r in rows) == (split == "test")
 
 
-@pytest.mark.parametrize("metric", ["ctcvr_prauc", "pcvr_ne", "ctr_ne"])
+@pytest.mark.parametrize("metric", ["ctcvr_prauc", "pcvr_ne", "ctr_ne", "ctcvr_ne"])
 @pytest.mark.parametrize("keep,enabled,expected_epochs,expected_kept", [
     ("best", True, 4, 2), ("best", False, 5, 2),
     ("last", True, 5, 5), ("last", False, 5, 5), ("last", None, 5, 5),

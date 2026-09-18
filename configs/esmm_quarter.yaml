@@ -15,7 +15,7 @@ training:
   shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
                          # rows together, which on user-ordered data collapses
                          # a batch to a few hundred distinct users
-  checkpoint_metric: pcvr_ne  # minimize CVR NE on clicked validation impressions
+  checkpoint_metric: ctcvr_ne  # minimize native q*v NE on all validation impressions
   keep_checkpoint: best  # same validation selection rule for full, half and quarter
   save_predictions: false  # score train/val/test in memory; write metrics only
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only

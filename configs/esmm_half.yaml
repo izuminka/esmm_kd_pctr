@@ -13,7 +13,7 @@ training:
   shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
                          # rows together, which on user-ordered data collapses
                          # a batch to a few hundred distinct users
-  checkpoint_metric: pcvr_ne  # minimize CVR NE on clicked validation impressions
+  checkpoint_metric: ctcvr_ne  # minimize native q*v NE on all validation impressions
   keep_checkpoint: best  # same validation selection rule for full, half and quarter
   save_predictions: false  # score train/val/test in memory; write metrics only
   gpus: -1            # -1 = single GPU (cuda:0) if available; 0 = CPU only
@@ -34,9 +34,9 @@ model_params:
 # Frozen DCN-V2 pCTR p, used only for the test CTCVR-logged (p*v) report.
 # It is not used for training, validation or checkpoint selection.
 logged_pctr:
-  dcn_run: artifacts/dcn/20260916T232126Z  # the dcn entry in best_models.yaml
+  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z  # the dcn entry in best_models.yaml
   predictions:  # only required splits; joined by sample_id
-    test: artifacts/dcn/20260916T232126Z/predictions/test.parquet
+    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
   score_column: score
 
 evaluation:

@@ -7,7 +7,7 @@ the data pipeline that feeds them, each built and validated against real data
 one chunk at a time.
 
 The matched ESMM controls and logged-score validation rules are documented in
-[EVALUATION.md](EVALUATION.md).
+[EVALUATION.md](evaluation/EVALUATION.md).
 
 The 2025 CNN + attention multitask model is available as `cnn_attention`.
 See [CNN_ATTENTION.md](models/CNN_ATTENTION.md) for the runnable recipe, architecture

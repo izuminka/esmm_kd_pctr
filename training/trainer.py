@@ -213,7 +213,7 @@ class Trainer:
             split = getattr(dataset, split_name)
             if split is not None and not (use_numpy and split.logged_pctr is not None):
                 raise ValueError(f"{self.model_name} needs logged pCTR on the encoded {split_name} split")
-        if self.checkpoint_metric == "logged_ctcvr_prauc" and "val" not in self.logged_ctcvr_splits:
+        if self.checkpoint_metric in ("logged_ctcvr_prauc", "logged_ctcvr_ne") and "val" not in self.logged_ctcvr_splits:
             raise ValueError("validation p*v requires esmm_logged_pctr; native ESMM validates on q*v")
 
         random.seed(self.seed)
@@ -537,9 +537,9 @@ class Trainer:
             return column("v")[clicked], z[clicked]
         if self.checkpoint_metric in ("ctr_auc", "ctr_ne", "ctr_prauc"):
             return column("q" if self.is_esmm or self.is_cnn_attention else "score"), y
-        if self.checkpoint_metric == "ctcvr_prauc":
+        if self.checkpoint_metric in ("ctcvr_prauc", "ctcvr_ne"):
             return column("q") * column("v"), y * z
-        if self.checkpoint_metric == "logged_ctcvr_prauc":
+        if self.checkpoint_metric in ("logged_ctcvr_prauc", "logged_ctcvr_ne"):
             if "val" not in self.logged_ctcvr_splits:
                 raise ValueError("validation p*v requires esmm_logged_pctr; native ESMM validates on q*v")
             return column("p") * column("v"), y * z
@@ -608,7 +608,7 @@ class Trainer:
             # avoid sorting millions of scores a second time for selection.
             return (extras["val_ctr_auc"] if "val_ctr_auc" in extras
                     else auc(score.numpy(), label.numpy())), extras
-        if self.checkpoint_metric == "ctr_ne":
+        if self.checkpoint_metric in ("ctr_ne", "ctcvr_ne", "logged_ctcvr_ne"):
             return normalized_entropy(score.numpy(), label.numpy()), extras
         return pr_auc(score.numpy(), label.numpy()), extras
 

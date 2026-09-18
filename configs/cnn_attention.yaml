@@ -1,0 +1,35 @@
+# El-Sherief et al. (2025), using this project's existing Ali-CCP protocol.
+# Table II CTR AUC reference: 0.661; see models/CNN_ATTENTION.md for assumptions.
+model: cnn_attention
+
+training:
+  epochs: 5
+  batch_size: 1000
+  eval_batch_size: 1000
+  lr: 0.001
+  weight_decay: 0.0
+  grad_clip_norm: 0
+  seed: 42
+  shuffle_block_size: 1
+  checkpoint_metric: ctr_ne  # minimize validation CTR normalized entropy
+  keep_checkpoint: best
+  save_predictions: false
+  gpus: -1
+  load_test: false
+  out_dir: artifacts
+  early_stopping:
+    enabled: false
+    patience: 2
+    min_delta: 0.0
+
+model_params:
+  emb_dim: 5
+  conv_channels: [32, 64, 32]  # assumption: paper does not specify channel counts
+  kernel_size: 3             # assumption: stride 1, padding 1, no pooling
+  tower_dims: [128, 64, 32]
+  dropout: 0.2               # assumption: rate is unspecified
+  alpha: 1.0                 # assumption: Eq. 6 sign corrected to penalize c > q
+
+data:
+  csv_dir: ali-ccp/extracted
+  encoded_dir: ali-ccp/encoded

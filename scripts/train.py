@@ -66,6 +66,9 @@ def build_model(cfg: dict, vocab_sizes: dict):
     if cfg["model"] == "esmm_logged_pctr":
         from models.esmm_logged_pctr import LoggedPctrESMM
         return LoggedPctrESMM(vocab_sizes, **params)
+    if cfg["model"] == "cnn_attention":
+        from models.cnn_attention import CNNAttention
+        return CNNAttention(vocab_sizes, **params)
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 
 
@@ -84,7 +87,7 @@ def build_metric_fn(cfg: dict):
             "ctcvr_prauc": ("ctcvr", "pr_auc"),
         }[metric_name]
         return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z, is_logged_ctcvr=False)[population][metric]
-    if cfg["model"] == "esmm_logged_pctr":
+    if cfg["model"] in ("esmm_logged_pctr", "cnn_attention"):
         return None  # encoded data path only, where the trainer scores validation itself
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 

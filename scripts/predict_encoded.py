@@ -57,6 +57,9 @@ def build_model(model_type: str, vocab_sizes: dict, params: dict):
     if model_type == "esmm_logged_pctr":
         from models.esmm_logged_pctr import LoggedPctrESMM
         return LoggedPctrESMM(vocab_sizes, **params)
+    if model_type == "cnn_attention":
+        from models.cnn_attention import CNNAttention
+        return CNNAttention(vocab_sizes, **params)
     raise ValueError(f"Unknown model_type: {model_type!r}")
 
 
@@ -111,8 +114,9 @@ def main():
             run_cfg = yaml.safe_load(f)
     else:
         run_cfg = cfg
-    model = build_model(ckpt["model_type"], ckpt["vocab_sizes"],
-                        run_cfg.get("model_params", {})).to(device)
+    params = (ckpt["model_params"] if ckpt["model_type"] == "cnn_attention"
+              else run_cfg.get("model_params", {}))
+    model = build_model(ckpt["model_type"], ckpt["vocab_sizes"], params).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
 
     is_logged_ctcvr = "logged_pctr" in run_cfg and args.split in logged_ctcvr_splits(run_cfg)

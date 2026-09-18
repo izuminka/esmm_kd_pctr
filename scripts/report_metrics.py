@@ -36,6 +36,9 @@ from evaluation.metrics import compute_metrics
 # Table 2, DCN-V2 pCTR row: the target this reproduction is measured against.
 _PAPER_DCN_CTR = {"auc": 0.620567, "pr_auc": 0.059938, "ne": 0.980200, "ce": 1.014134}
 _PAPER_TEST_CENSUS = {"rows": 43_016_614, "positives": 1_673_447}
+# El-Sherief et al., IJACSA 2025, Table II. Different preprocessing/splits;
+# this is a reference target, not an assertion of an identical protocol.
+_PAPER_CNN_ATTENTION_CTR_AUC = 0.661
 _LABEL_COLUMNS = ("sample_id", "y", "z")
 
 
@@ -78,6 +81,9 @@ def populations(
             rows["CTCVR-logged"] = (scores["p"] * scores["v"], y * z)
         rows["pCVR"] = (scores["v"][clicked], z[clicked])  # clicked impressions only
         return rows
+    if model == "cnn_attention":
+        # c is already an impression-level conversion score, not conditional v.
+        return {"CTR": (scores["q"], y), "CTCVR": (scores["c"], z)}
     return {"CTR": (scores["score"], y)}
 
 
@@ -91,11 +97,16 @@ def metric_rows(
     """One row per population: its size, positives and the four metrics."""
     y, z = np.asarray(y), np.asarray(z)
     scores = {c: np.asarray(s) for c, s in scores.items()}
-    return [
+    rows = [
         {"split": split, "population": population,
          "rows": len(label), "positives": int(label.sum()), **compute_metrics(score, label)}
         for population, (score, label) in populations(model, y, z, scores).items()
     ]
+    if model == "cnn_attention" and split == "test":
+        ctr = next(row for row in rows if row["population"] == "CTR")
+        ctr["reference_auc"] = _PAPER_CNN_ATTENTION_CTR_AUC
+        ctr["auc_delta"] = ctr["auc"] - _PAPER_CNN_ATTENTION_CTR_AUC
+    return rows
 
 
 def _attach_logged_pctr_source(rows: list[dict], logged_pctr: dict | None) -> None:
@@ -118,7 +129,7 @@ def main():
     ap = argparse.ArgumentParser(description="Report metrics from prediction parquets.")
     ap.add_argument("--artifacts", default=os.path.join(_ROOT_DIR, "artifacts"),
                     help="artifacts root, used to find the latest run")
-    ap.add_argument("--model", default=None, choices=["dcn", *ESMM_MODELS],
+    ap.add_argument("--model", default=None, choices=["dcn", "cnn_attention", *ESMM_MODELS],
                     help="which populations to report; defaults to the run's own model")
     ap.add_argument("--name", default=None,
                     help="config name whose latest run to read, e.g. esmm_logged_pctr_kd05")
@@ -182,6 +193,13 @@ def main():
                   f"{test['positives'] - _PAPER_TEST_CENSUS['positives']:>10,} "
                   f"{test['auc'] - p['auc']:>+10.6f} {test['pr_auc'] - p['pr_auc']:>+11.6f} "
                   f"{test['ne'] - p['ne']:>+10.6f} {test['ce'] - p['ce']:>+10.6f}")
+
+    if model == "cnn_attention":
+        print(f"Paper CTR AUC reference: {_PAPER_CNN_ATTENTION_CTR_AUC:.3f} "
+              "(different preprocessing/splits; see models/CNN_ATTENTION.md)")
+        test = next((r for r in rows if r["split"] == "test" and r["population"] == "CTR"), None)
+        if test:
+            print(f"Test CTR AUC delta: {test['auc'] - _PAPER_CNN_ATTENTION_CTR_AUC:+.6f}")
 
     out = os.path.join(run_dir, "metrics.json")
     with open(out, "w") as f:

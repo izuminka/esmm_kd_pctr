@@ -153,6 +153,9 @@ class Trainer:
             raise ValueError(f"keep_checkpoint must be 'best' or 'last', got {self.keep_checkpoint!r}")
         from scripts.report_metrics import ESMM_MODELS, logged_ctcvr_splits
         self.is_esmm = self.model_name in ESMM_MODELS
+        self.is_cnn_attention = self.model_name == "cnn_attention"
+        if self.is_cnn_attention and self.checkpoint_metric not in ("ctr_auc", "ctr_ne", "ctr_prauc"):
+            raise ValueError("cnn_attention checkpoint_metric must be ctr_auc, ctr_ne, or ctr_prauc")
         # Logged-score models validate on p*v; native ESMM only reports it on test.
         self.logged_ctcvr_splits = logged_ctcvr_splits(cfg)
         self.is_logged_ctcvr = bool(self.logged_ctcvr_splits)
@@ -200,6 +203,8 @@ class Trainer:
         """
         from training.dataset import NumpyDataset
         use_numpy = isinstance(dataset, NumpyDataset)
+        if self.is_cnn_attention and not use_numpy:
+            raise ValueError("cnn_attention requires the encoded NumpyDataset pipeline")
 
         needed = set(self.logged_ctcvr_splits)
         if self.model_name == "esmm_logged_pctr":
@@ -223,8 +228,9 @@ class Trainer:
             f"val_{population}_{metric}"
             for name, population in _HISTORY_POPULATIONS.items()
             if name != "CTCVR-logged" or "val" in self.logged_ctcvr_splits
+            if not self.is_cnn_attention or name in ("CTR", "CTCVR")
             for metric in _HISTORY_METRICS.values()
-        ) if self.is_esmm else ()
+        ) if self.is_esmm or self.is_cnn_attention else ()
         with open(history_path, "w", newline="") as f:
             csv.writer(f).writerow(["epoch", "loss", "val_score", "seconds", "saved", *history_extras])
 
@@ -297,6 +303,8 @@ class Trainer:
                 if self.model_name == "esmm_logged_pctr":
                     ckpt_data["model_params"].update(
                         objective=model.objective, alpha=model.alpha, aux_weight=model.aux_weight)
+                if self.is_cnn_attention:
+                    ckpt_data["model_params"] = model.model_params
                 if self.logged_pctr_source is not None:
                     ckpt_data["logged_pctr"] = self.logged_pctr_source
                 torch.save(ckpt_data, checkpoint_path)
@@ -473,6 +481,10 @@ class Trainer:
             from models.esmm import esmm_loss
             q, v = model(enc)
             loss = esmm_loss(y, z, q, v, model.aux_weight)
+        elif self.is_cnn_attention:
+            from models.cnn_attention import cnn_attention_loss
+            click_logits, conversion_logits = model(enc)
+            loss = cnn_attention_loss(y, z, click_logits, conversion_logits, model.alpha)
         else:
             from models.dcn import dcn_loss
             loss = dcn_loss(y, model(enc))
@@ -501,6 +513,9 @@ class Trainer:
             if split_name in self.logged_ctcvr_splits:
                 scores["p"] = split_data.logged_pctr[idx]
             return scores
+        if self.is_cnn_attention:
+            click_logits, conversion_logits = model(enc)
+            return {"q": torch.sigmoid(click_logits), "c": torch.sigmoid(conversion_logits)}
         return {"score": torch.sigmoid(model(enc))}
 
     def _selection_inputs(
@@ -520,8 +535,8 @@ class Trainer:
         if self.checkpoint_metric == "pcvr_ne":
             clicked = y == 1
             return column("v")[clicked], z[clicked]
-        if self.checkpoint_metric in ("ctr_ne", "ctr_prauc"):
-            return column("q" if self.is_esmm else "score"), y
+        if self.checkpoint_metric in ("ctr_auc", "ctr_ne", "ctr_prauc"):
+            return column("q" if self.is_esmm or self.is_cnn_attention else "score"), y
         if self.checkpoint_metric == "ctcvr_prauc":
             return column("q") * column("v"), y * z
         if self.checkpoint_metric == "logged_ctcvr_prauc":
@@ -558,7 +573,7 @@ class Trainer:
 
     def _val_score_numpy(self, model, val_split) -> tuple[float, dict]:
         """Score the complete validation population with the final-report evaluator."""
-        from evaluation.metrics import normalized_entropy, pr_auc
+        from evaluation.metrics import auc, normalized_entropy, pr_auc
         model.eval()
         columns, ys, zs = {}, [], []
         eval_batch = self.eval_batch_size
@@ -576,8 +591,10 @@ class Trainer:
         y, z = torch.cat(ys), torch.cat(zs)
 
         score, label = self._selection_inputs(scores, y, z)
+        if self.checkpoint_metric == "ctr_auc" and not ((label == 0).any() and (label == 1).any()):
+            raise ValueError("ctr_auc checkpoint selection requires both click classes in validation")
         extras = {}
-        if self.is_esmm:
+        if self.is_esmm or self.is_cnn_attention:
             from scripts.report_metrics import metric_rows
             rows = metric_rows("val", self.model_name, y.numpy().astype(_LABEL_DTYPES["y"]),
                                z.numpy().astype(_LABEL_DTYPES["z"]),
@@ -586,6 +603,11 @@ class Trainer:
                       for row in rows for metric, suffix in _HISTORY_METRICS.items()}
         if self.checkpoint_metric == "pcvr_ne":
             return extras["val_pcvr_ne"], extras
+        if self.checkpoint_metric == "ctr_auc":
+            # The multitask report already computed AUC over the full split;
+            # avoid sorting millions of scores a second time for selection.
+            return (extras["val_ctr_auc"] if "val_ctr_auc" in extras
+                    else auc(score.numpy(), label.numpy())), extras
         if self.checkpoint_metric == "ctr_ne":
             return normalized_entropy(score.numpy(), label.numpy()), extras
         return pr_auc(score.numpy(), label.numpy()), extras

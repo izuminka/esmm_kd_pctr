@@ -19,7 +19,7 @@ invariant having been enforced upstream.
 import torch
 
 from evaluation.metrics import compute_metrics
-from training.downsampling import recover_ctr, validate_rate
+from training.downsampling import DEFAULT_NONCLICK_RATE, recover_ctr, validate_rate
 
 
 def evaluate_esmm(
@@ -29,7 +29,7 @@ def evaluate_esmm(
     z: torch.Tensor,                    # conversion label; y*z is the CTCVR label
     p: torch.Tensor | None = None,      # frozen logged pCTR, needed for logged CTCVR
     is_logged_ctcvr: bool = True,       # also score the logged product p * v
-    nonclick_rate: float = 1.0,         # training retention; evaluation is full-rate
+    nonclick_rate: float = DEFAULT_NONCLICK_RATE,  # training retention; evaluation is full-rate
 ) -> dict:
     nonclick_rate = validate_rate(nonclick_rate)
     if is_logged_ctcvr and p is None:

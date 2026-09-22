@@ -7,6 +7,9 @@ import torch
 
 from training.cohorts import CohortSplit
 
+DEFAULT_NONCLICK_RATE = 1.0
+NONCLICK_SAMPLING_KEY = "nonclick_sampling"
+
 
 def validate_rate(rate):
     if (isinstance(rate, bool) or not isinstance(rate, (int, float))
@@ -26,7 +29,7 @@ def _validate_spec(spec):
 
 def from_config(cfg):
     """One opt-in contract; existing configs have no sampling or correction."""
-    spec = cfg.get("data", {}).get("nonclick_sampling")
+    spec = cfg.get("data", {}).get(NONCLICK_SAMPLING_KEY)
     if spec is None:
         return None
     if cfg["model"] != "esmm":
@@ -46,7 +49,7 @@ def restrict(split, spec):
     return CohortSplit(split, rows, [len(rows)])
 
 
-def recover_ctr(q, rate=1.0):
+def recover_ctr(q, rate=DEFAULT_NONCLICK_RATE):
     """Invert click-based sampling on raw CTR only; pCVR stays unchanged.
 
     The full-population product is recover_ctr(q_R) * v, never recovery of

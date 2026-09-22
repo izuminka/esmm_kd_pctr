@@ -21,6 +21,7 @@ import pandas as pd
 import torch
 
 from data.vocab import encode_batch
+from training.downsampling import NONCLICK_SAMPLING_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +126,9 @@ def write_split(run_dir: str, split: str, model: str, ids, ys, zs, scores: dict,
 
 class Trainer:
     def __init__(self, cfg: dict, root_dir: str):
-        from training.downsampling import from_config
+        from training.downsampling import DEFAULT_NONCLICK_RATE, from_config
         self.nonclick_sampling = from_config(cfg)
-        self.nonclick_rate = self.nonclick_sampling["rate"] if self.nonclick_sampling else 1.0
+        self.nonclick_rate = self.nonclick_sampling["rate"] if self.nonclick_sampling else DEFAULT_NONCLICK_RATE
         tr = cfg["training"]
         self.model_name = cfg["model"]
         self.epochs = tr["epochs"]
@@ -313,7 +314,7 @@ class Trainer:
                 if self.logged_pctr_source is not None:
                     ckpt_data["logged_pctr"] = self.logged_pctr_source
                 if self.nonclick_sampling is not None:
-                    ckpt_data["nonclick_sampling"] = self.nonclick_sampling
+                    ckpt_data[NONCLICK_SAMPLING_KEY] = self.nonclick_sampling
                 torch.save(ckpt_data, checkpoint_path)
                 logger.info("  -> checkpoint saved (val_score=%.4f)", score)
 

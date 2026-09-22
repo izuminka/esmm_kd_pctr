@@ -32,7 +32,7 @@ if _CODE_DIR not in sys.path:
 import torch  # noqa: E402
 
 from data.logged_pctr import load_logged_pctr  # noqa: E402
-from training import cohorts  # noqa: E402
+from training import cohorts, downsampling  # noqa: E402
 from scripts.report_metrics import logged_ctcvr_splits  # noqa: E402
 from training.dataset import CommonTable, SplitData  # noqa: E402
 from training.runs import record_logged_pctr, resolve_run, run_name  # noqa: E402
@@ -133,10 +133,18 @@ def main():
         split = cohorts.restrict(split, run_cfg["data"]["train_cohort"])
         logger.info("  train cohort: %d rows", len(split))
 
+    # Saved settings own the correction, even if today's config has changed.
+    sampling = ckpt.get(downsampling.NONCLICK_SAMPLING_KEY,
+                        run_cfg.get("data", {}).get(downsampling.NONCLICK_SAMPLING_KEY))
+    if args.split == "train" and sampling is not None:
+        split = downsampling.restrict(split, sampling)
+        logger.info("  retained training rows: %d", len(split))
+
     t0 = time.perf_counter()
     # The run's model and its own logged-CTCVR setting decide the score columns,
     # so an older run without logged pCTR exports exactly what it did before.
     trainer_cfg = {**cfg, "model": ckpt["model_type"], "model_params": run_cfg.get("model_params", {}),
+                   "data": {downsampling.NONCLICK_SAMPLING_KEY: sampling},
                    "evaluation": {"is_logged_ctcvr": is_logged_ctcvr}}
     ids, ys, zs, scores = Trainer(trainer_cfg, _ROOT_DIR)._predict_numpy(model, split, split_name=args.split)
     if args.out:

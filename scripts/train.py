@@ -88,7 +88,7 @@ def build_metric_fn(cfg: dict):
             "ctcvr_ne": ("ctcvr", "ne"),
         }[metric_name]
         sampling = downsampling.from_config(cfg)
-        rate = sampling["rate"] if sampling else 1.0
+        rate = sampling["rate"] if sampling else downsampling.DEFAULT_NONCLICK_RATE
         return lambda model, enc, y, z: evaluate_esmm(
             model, enc, y, z, is_logged_ctcvr=False, nonclick_rate=rate)[population][metric]
     if cfg["model"] in ("esmm_logged_pctr", "cnn_attention"):
@@ -180,11 +180,11 @@ def main():
             np.save(os.path.join(run_dir, "retained_sample_ids.npy"),
                     dataset.train.sample_ids.cpu().numpy())
             counts = {k: v for k, v in dataset.train.census().items() if k != "rank_rows"}
-            runs.update_run(run_dir, nonclick_sampling={
+            runs.update_run(run_dir, **{downsampling.NONCLICK_SAMPLING_KEY: {
                 **sampling, **counts, "original_rows": original_rows,
                 "sample_ids_file": "retained_sample_ids.npy",
                 "reported_ctr": "full_population_posterior",
-            })
+            }})
             logger.info("Nonclick retention %s: %d/%d train rows, %d clicks, %d conversions",
                         sampling["rate"], len(dataset.train), original_rows,
                         counts["n_clicks"], counts["n_conversions"])

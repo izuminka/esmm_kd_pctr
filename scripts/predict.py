@@ -19,6 +19,7 @@ if _CODE_DIR not in sys.path:
 
 from data.raw import is_validation, iter_impressions
 from training.trainer import Trainer, save_predictions, save_esmm_predictions
+from training.downsampling import NONCLICK_SAMPLING_KEY
 
 
 def _load_checkpoint(path: str):
@@ -72,11 +73,14 @@ def main():
     imps = _select_split(all_imps, args.split)
     print(f"  {len(imps)} impressions in split {args.split!r}")
 
-    cfg = {"model": ckpt["model_type"], "training": {"batch_size": 4096,
-                                                     "eval_batch_size": 4096, "gpus": -1,
-                                                       "out_dir": ".", "eval_batch_size": 4096,
-                                                     "grad_clip_norm": 0}}
+    cfg = {"model": ckpt["model_type"],
+           "data": {NONCLICK_SAMPLING_KEY: ckpt.get(NONCLICK_SAMPLING_KEY)},
+           "evaluation": {"is_logged_ctcvr": False},
+           "training": {"epochs": 1, "lr": 0.001, "shuffle_block_size": 1,
+                        "batch_size": 4096, "eval_batch_size": 4096,
+                        "gpus": -1, "out_dir": ".", "grad_clip_norm": 0}}
     trainer = Trainer(cfg, _ROOT_DIR)
+    model = model.to(trainer.device)
     if ckpt["model_type"] == "esmm":
         ids, ys, zs, qs, vs = trainer.predict_esmm(model, imps, ckpt["vocabs"], ckpt["field_ids"])
         save_esmm_predictions(ids, ys, zs, qs, vs, out_path)

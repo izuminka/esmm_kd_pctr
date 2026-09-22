@@ -19,6 +19,7 @@ if _CODE_DIR not in sys.path:
 
 from data.raw import is_validation, iter_impressions
 from data.vocab import encode_batch
+from training.downsampling import DEFAULT_NONCLICK_RATE, NONCLICK_SAMPLING_KEY
 
 
 def _load_checkpoint(path: str):
@@ -75,7 +76,8 @@ def main():
         results = evaluate_dcn(model, encoded, y)
     elif ckpt["model_type"] == "esmm":
         from evaluation.esmm import evaluate_esmm
-        results = evaluate_esmm(model, encoded, y, z, is_logged_ctcvr=False)  # no logged pCTR on this path
+        results = evaluate_esmm(model, encoded, y, z, is_logged_ctcvr=False,
+                                nonclick_rate=ckpt.get(NONCLICK_SAMPLING_KEY, {}).get("rate", DEFAULT_NONCLICK_RATE))
     else:
         raise ValueError(f"Unknown model_type: {ckpt['model_type']!r}")
 

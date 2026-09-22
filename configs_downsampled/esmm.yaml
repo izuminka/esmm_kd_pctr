@@ -13,7 +13,7 @@ training:
   save_predictions: false
   gpus: 1
   load_test: false
-  out_dir: artifacts_downsampled/runs
+  out_dir: artifacts_downsampled
   early_stopping:
     enabled: false
     patience: 2

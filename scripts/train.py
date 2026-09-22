@@ -32,7 +32,7 @@ if _CODE_DIR not in sys.path:
 
 from data.logged_pctr import attach_logged_pctr
 from scripts.report_metrics import logged_ctcvr_splits
-from training import cohorts, runs
+from training import cohorts, downsampling, runs
 from training.trainer import Trainer, resolve_device
 from training.dataset import NumpyDataset
 
@@ -87,7 +87,10 @@ def build_metric_fn(cfg: dict):
             "ctcvr_prauc": ("ctcvr", "pr_auc"),
             "ctcvr_ne": ("ctcvr", "ne"),
         }[metric_name]
-        return lambda model, enc, y, z: evaluate_esmm(model, enc, y, z, is_logged_ctcvr=False)[population][metric]
+        sampling = downsampling.from_config(cfg)
+        rate = sampling["rate"] if sampling else 1.0
+        return lambda model, enc, y, z: evaluate_esmm(
+            model, enc, y, z, is_logged_ctcvr=False, nonclick_rate=rate)[population][metric]
     if cfg["model"] in ("esmm_logged_pctr", "cnn_attention"):
         return None  # encoded data path only, where the trainer scores validation itself
     raise ValueError(f"Unknown model: {cfg['model']!r}")
@@ -109,6 +112,7 @@ def main():
     args.config = os.path.abspath(args.config)
 
     cfg = load_config(args.config)
+    sampling = downsampling.from_config(cfg)
     name = runs.run_name(args.config)
     logger.info(
         "Config: %s  model=%s  epochs=%d  batch_size=%d  lr=%s",
@@ -169,6 +173,21 @@ def main():
             logger.info("Train cohort: %d of %d rows (fraction %s, per-range %s)",
                         census["n_rows"], len(dataset.train.split), spec["fraction"],
                         census["rank_rows"])
+
+        if sampling is not None:
+            original_rows = len(dataset.train)
+            dataset.train = downsampling.restrict(dataset.train, sampling)
+            np.save(os.path.join(run_dir, "retained_sample_ids.npy"),
+                    dataset.train.sample_ids.cpu().numpy())
+            counts = {k: v for k, v in dataset.train.census().items() if k != "rank_rows"}
+            runs.update_run(run_dir, nonclick_sampling={
+                **sampling, **counts, "original_rows": original_rows,
+                "sample_ids_file": "retained_sample_ids.npy",
+                "reported_ctr": "full_population_posterior",
+            })
+            logger.info("Nonclick retention %s: %d/%d train rows, %d clicks, %d conversions",
+                        sampling["rate"], len(dataset.train), original_rows,
+                        counts["n_clicks"], counts["n_conversions"])
 
         model = build_model(cfg, dataset.vocab_sizes)
         metric_fn = build_metric_fn(cfg)

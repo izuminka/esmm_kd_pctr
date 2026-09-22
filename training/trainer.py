@@ -125,6 +125,9 @@ def write_split(run_dir: str, split: str, model: str, ids, ys, zs, scores: dict,
 
 class Trainer:
     def __init__(self, cfg: dict, root_dir: str):
+        from training.downsampling import from_config
+        self.nonclick_sampling = from_config(cfg)
+        self.nonclick_rate = self.nonclick_sampling["rate"] if self.nonclick_sampling else 1.0
         tr = cfg["training"]
         self.model_name = cfg["model"]
         self.epochs = tr["epochs"]
@@ -203,6 +206,8 @@ class Trainer:
         """
         from training.dataset import NumpyDataset
         use_numpy = isinstance(dataset, NumpyDataset)
+        if self.nonclick_sampling is not None and not use_numpy:
+            raise ValueError("nonclick sampling training requires the encoded dataset pipeline")
         if self.is_cnn_attention and not use_numpy:
             raise ValueError("cnn_attention requires the encoded NumpyDataset pipeline")
 
@@ -307,6 +312,8 @@ class Trainer:
                     ckpt_data["model_params"] = model.model_params
                 if self.logged_pctr_source is not None:
                     ckpt_data["logged_pctr"] = self.logged_pctr_source
+                if self.nonclick_sampling is not None:
+                    ckpt_data["nonclick_sampling"] = self.nonclick_sampling
                 torch.save(ckpt_data, checkpoint_path)
                 logger.info("  -> checkpoint saved (val_score=%.4f)", score)
 
@@ -390,6 +397,7 @@ class Trainer:
 
     def predict_esmm(self, model, impressions: list, vocabs: dict, field_ids: list) -> tuple:
         """Return (sample_ids, ys, zs, q_scores, v_scores) as plain Python lists."""
+        from training.downsampling import recover_ctr
         model.eval()
         device = self.device
         ids, ys, zs, q_scores, v_scores = [], [], [], [], []
@@ -401,6 +409,8 @@ class Trainer:
                 ids.extend(imp.sample_id for imp in batch)
                 ys.extend(imp.y for imp in batch)
                 zs.extend(imp.z for imp in batch)
+                if self.nonclick_rate < 1.0:
+                    q = recover_ctr(q, self.nonclick_rate)
                 q_scores.extend(q.cpu().tolist())
                 v_scores.extend(v.cpu().tolist())
         return ids, ys, zs, q_scores, v_scores
@@ -509,6 +519,9 @@ class Trainer:
         """
         if self.is_esmm:
             q, v = model(enc)
+            if q is not None and self.nonclick_rate < 1.0:
+                from training.downsampling import recover_ctr
+                q = recover_ctr(q, self.nonclick_rate)
             scores = {"v": v} if q is None else {"q": q, "v": v}
             if split_name in self.logged_ctcvr_splits:
                 scores["p"] = split_data.logged_pctr[idx]

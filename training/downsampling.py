@@ -3,6 +3,7 @@
 import math
 
 import numpy as np
+import torch
 
 from training.cohorts import CohortSplit
 
@@ -14,14 +15,8 @@ def validate_rate(rate):
     return float(rate)
 
 
-def from_config(cfg):
-    """One opt-in contract; existing configs have no sampling or correction."""
-    spec = cfg.get("data", {}).get("nonclick_sampling")
-    if spec is None:
-        return None
-    if cfg["model"] != "esmm":
-        raise ValueError("nonclick_sampling currently supports plain ESMM only")
-    if set(spec) != {"rate", "seed"}:
+def _validate_spec(spec):
+    if not isinstance(spec, dict) or set(spec) != {"rate", "seed"}:
         raise ValueError("nonclick_sampling requires exactly rate and seed")
     seed = spec["seed"]
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
@@ -29,9 +24,20 @@ def from_config(cfg):
     return {"rate": validate_rate(spec["rate"]), "seed": seed}
 
 
+def from_config(cfg):
+    """One opt-in contract; existing configs have no sampling or correction."""
+    spec = cfg.get("data", {}).get("nonclick_sampling")
+    if spec is None:
+        return None
+    if cfg["model"] != "esmm":
+        raise ValueError("nonclick_sampling currently supports plain ESMM only")
+    return _validate_spec(spec)
+
+
 def restrict(split, spec):
     """Reuse the cohort view; membership is fixed by encoded row order and seed."""
-    rate = validate_rate(spec["rate"])
+    spec = _validate_spec(spec)
+    rate = spec["rate"]
     clicks = split.ys.cpu().numpy() == 1
     keep = clicks | (np.random.default_rng(spec["seed"]).random(len(split)) < rate)
     rows = np.flatnonzero(keep)
@@ -49,4 +55,13 @@ def recover_ctr(q, rate=1.0):
     rate = validate_rate(rate)
     if rate == 1:
         return q
+    # Avoid underflow of the rate before division: q=1 would otherwise yield
+    # 0/0, and near-one scores can lose representable results. Promote only
+    # these extreme rates, then restore the original score dtype/device.
+    if (isinstance(q, torch.Tensor) and q.is_floating_point()
+            and q.dtype != torch.float64 and rate < torch.finfo(q.dtype).tiny):
+        return recover_ctr(q.double(), rate).to(q.dtype)
+    if (isinstance(q, np.ndarray) and np.issubdtype(q.dtype, np.floating)
+            and q.dtype != np.float64 and rate < np.finfo(q.dtype).tiny):
+        return recover_ctr(q.astype(np.float64), rate).astype(q.dtype)
     return rate * q / ((1 - q) + rate * q)

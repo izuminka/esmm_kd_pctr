@@ -1,72 +1,116 @@
-# ESMM evaluation protocol
+# Train once, evaluate many pCTR sources
 
-`configs/esmm.yaml`, `esmm_half.yaml`, `esmm_third.yaml`, and `esmm_quarter.yaml` use the same
-training and selection settings. `data.train_cohort` differs, and the historical
-quarter config retains its original test-only DCN teacher. The quarter
-cohort is nested in half; validation and test always use their full populations.
+Active recipes live in `configs/<model>/train.yaml`: ESMM, the selected
+`dcn_matched_stats_wd3e6`, and full-data KD–0.3, KD–0.5, KD–0.7, and KD–teacher.
+Exploratory and appendix recipes are preserved in `configs_old/<model>/`.
+Downsampled recipes use the same layout under `configs_downsampled/`.
+Run names come from the parent directory of `train.yaml`; existing flat
+configs and run snapshots remain supported.
 
-| Model | Conversion score in training | Validation selection | Logged pCTR files needed |
-| --- | --- | --- | --- |
-| ESMM full / half / third / quarter | `q*v` | Lowest native CTCVR NE (`q*v`, all impressions) | Test |
-| Logged-pCTR KD / teacher variants | `q*v`; `p` supplies the CTR soft target | Lowest logged CTCVR NE (`p*v`); legacy 2x-aux configs retain PR-AUC | Train, validation, test |
-| Logged-pCTR product-only | `p*v` | Logged CTCVR PR-AUC (`p*v`) | Train, validation, test |
+Plain ESMM training configs have no logged-pCTR source or evaluation flag.
+They train and select on their native scores. KD configs retain the teacher
+inputs needed by their training and validation objectives.
 
-Logged-score models (KD, teacher, and product-only) validate and select on `p*v`.
-For KD this is an explicit selection rule; its training conversion loss still
-uses `q*v`. Native ESMM models neither load nor use validation logged pCTR. The
-pipeline rejects `logged_ctcvr_prauc` and `logged_ctcvr_ne` selection for native ESMM. Train reports do not
-include `p*v`; test reports include it when `evaluation.is_logged_ctcvr` is true.
-Turning that flag off does not remove logged-model validation: KD and product-only
-still require validation logged scores for checkpoint selection.
+## Separate test evaluation
 
-For the matched ESMM cohort controls:
+All active training recipes set `training.evaluate_test: false`: training
+selects the checkpoint on validation and reports train/validation metrics.
+Run `scripts/evaluate_run.py --run-dir <run>` afterward for native test metrics.
+Add one or more `--logged-config` arguments to evaluate logged CTCVR. The add-on
+works with any pCVR predictor exporting `v`; no ESMM model-name check is used.
+A new architecture still needs the usual model builder and prediction support.
 
-- Seed Python, NumPy, and Torch with `training.seed` before constructing the
-  model. All controls use seed 42 and the same vocabulary and architecture.
-  GPU kernels are not forced to be deterministic.
-- Validate after every epoch; minimize native CTCVR normalized entropy
-  (`ctcvr_ne`) on `q*v` against `y*z` over all validation impressions.
-  NE is recorded as a positive loss, with lower better.
-- Train for exactly five epochs with early stopping disabled. Retain the
-  strictly lowest NE (`min_delta: 0.0`); ties retain the earlier checkpoint.
-- Restore the best checkpoint before reporting any final split metrics.
-- Record AUC, PR-AUC, NE, and CE for CTR, native CTCVR, and clicked pCVR each
-  epoch in `history.csv`. KD additionally records logged CTCVR; product-only
-  records logged CTCVR and clicked pCVR.
-- Evaluate test after checkpoint selection; test metrics never select models.
+## Independent logged evaluation
 
-Different arms may retain different epochs. Equal passes through differently
-sized cohorts do not imply equal numbers of updates. For a separate fixed-epoch
-experiment, use `keep_checkpoint: last`: it always runs the configured number
-of epochs and exports the final weights. Early stopping is disabled in this
-mode, even if `early_stopping.enabled` is true. With `keep_checkpoint: best`,
-`early_stopping.enabled: false` runs the full budget but restores the best
-validation checkpoint.
+Each `eval_<pctr_model>.yaml` names one frozen producer:
 
-## Score populations
+```yaml
+pctr_model: dcn_matched_stats_wd3e6
+logged_pctr:
+  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z
+  predictions:
+    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
+  score_column: score
+```
+
+From the project root:
+
+```bash
+OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 code/.venv/bin/python code/scripts/evaluate_run.py \
+  --run-dir artifacts_downsampled/esmm_retention_5pct/20260922T234215Z \
+  --logged-config code/configs_downsampled/esmm/eval_dcn_matched_stats_wd3e6.yaml \
+  --gpus 1
+```
+
+The evaluator reuses `predictions/test.parquet` if present, or loads the
+selected checkpoint and generates all native heads once on the full test set.
+It reports native metrics before evaluating optional logged sources. Subsequent sources reuse these predictions without loading the
+model or encoded feature arrays into a GPU. They join logged pCTR by sample ID,
+verify unique IDs and matching click labels, and score `p*v` against `y*z`.
+No training or checkpoint reselection occurs. No correction is applied to
+logged pCTR or pCVR; the downsampling correction belongs only to native pCTR.
+
+```text
+<trained_run>/
+├── best.pt
+├── config.yaml                         # Original training snapshot
+├── metrics/                            # Original native metrics
+├── metrics.json                        # Original aggregate report
+├── predictions/
+│   ├── test.parquet                     # sample_id, y, z, native score columns
+│   └── test.provenance.json             # Checkpoint/input identity and file hash
+├── metrics_logged/
+│   └── <pctr_model>/
+│       ├── config.yaml
+│       ├── provenance.json
+│       └── test.json
+└── metrics_combined.json               # Explicit combined report
+```
+
+The cache binds predictions to checkpoint/config hashes and encoded test/common
+file sizes and modification timestamps. Encoded data should be immutable;
+reprocessing or replacing them invalidates the cache. Cache contents are also
+hashed. A stale/incomplete cache requires `--refresh-cache`. Writes are locked
+to prevent concurrent evaluations from building inconsistent caches.
+
+Each logged output records the selected checkpoint hash, cache hash, producer run,
+and producer prediction-file hash. Reusing a model name for a different source
+is rejected; use a distinct name such as `dcn_model_run2` to preserve both.
+Checkpoints, training snapshots, and run status are preserved. Native test
+metrics are created when missing, or recomputed with `--refresh-cache`.
+Legacy prediction exports without a sidecar are adopted after checking their
+IDs, labels, and age against the checkpoint/config; their provenance is trusted
+as an export of the finished run. Subsequent reuse checks the recorded hashes.
+
+To display native and separately logged metrics together:
+
+```bash
+code/.venv/bin/python code/scripts/report_metrics.py \
+  --run-dir artifacts_downsampled/esmm_retention_5pct/20260922T234215Z \
+  --include-logged
+```
+
+The command labels each external source and writes `metrics_combined.json`.
+Without `--include-logged`, reporting retains the existing native-report path.
+
+## Score populations and selection
 
 | Population | Score | Label | Rows |
 | --- | --- | --- | --- |
-| CTR | `q` | `y` | All impressions |
+| CTR | Native `q` (posterior-corrected when downsampled) | `y` | All impressions |
 | Native CTCVR | `q*v` | `y*z` | All impressions |
-| Logged CTCVR | `p*v` | `y*z` | Allowed splits above |
+| Logged CTCVR | Frozen `p*v` | `y*z` | Full test population |
 | Clicked pCVR | `v` | `z` | Only `y == 1` |
 
-PR-AUC is average precision. NE divides log loss by the population's label
-entropy; CE is sum(predictions) / sum(labels). The validation logger and final
-reports use the same evaluator. A head absent from a model has blank history
-columns and no metric row. AUC is undefined on a population with only one class.
+PR-AUC is average precision. NE divides log loss by label entropy; CE is
+sum(predictions) / sum(labels). AUC is undefined for a single-class population.
 
-## Existing runs
+Active ESMM runs select the lowest validation native CTCVR NE; active KD runs
+select the lowest validation logged CTCVR NE. Both train five epochs and
+restore the selected checkpoint before final evaluation; ties retain the
+earlier checkpoint. KD's conversion loss still uses `q*v`.
+Test metrics never select the checkpoint. The best-run registry refuses
+comparisons across different selection metrics.
 
-These settings apply to new training runs. Existing checkpoints and saved
-metrics are not retrained or rewritten by changing configs. In particular, old
-quarter runs selected on `p*v` are not matched controls under this protocol.
-Re-running the report script applies the population rules above, but cannot
-change how an old checkpoint was selected.
-
-The best-model registry refuses comparisons across different selection metrics.
-For a fresh matched study, pass the same new registry path to each training
-command, for example `--best-models best_models_standardized.yaml`, and compare
-the resulting run folders. Existing run folders retain their configs and code
-diffs for provenance.
+Existing saved configs with logged evaluation enabled retain their historical
+behavior. The separate evaluator adds new results without changing that history.

@@ -51,7 +51,9 @@ def logged_ctcvr_splits(cfg: dict) -> frozenset[str]:
     evaluation = cfg.get("evaluation", {})
     if cfg["model"] not in ESMM_MODELS:
         return frozenset()
-    splits = {"test"} if evaluation.get("is_logged_ctcvr", True) else set()
+    # Native ESMM defaults to native metrics; explicit legacy flags still work.
+    legacy_logged = cfg["model"] == "esmm_logged_pctr" or "logged_pctr" in cfg
+    splits = {"test"} if evaluation.get("is_logged_ctcvr", legacy_logged) else set()
     if cfg["model"] == "esmm_logged_pctr":
         splits.add("val")
     return frozenset(splits)
@@ -71,7 +73,7 @@ def populations(
     CTCVR-logged scores the product it is served with, p * v, beside the
     auxiliary-head product q * v.
     """
-    if model in ESMM_MODELS:
+    if "v" in scores:
         clicked = y == 1
         rows = {}
         if "q" in scores:
@@ -134,6 +136,8 @@ def main():
     ap.add_argument("--name", default=None,
                     help="config name whose latest run to read, e.g. esmm_logged_pctr_kd05")
     ap.add_argument("--run-dir", default=None, help="defaults to the latest run of --name")
+    ap.add_argument("--include-logged", action="store_true",
+                    help="include metrics_logged/<pctr_model> and write metrics_combined.json")
     args = ap.parse_args()
     if not (args.run_dir or args.name):
         ap.error("pass --run-dir, or --name to take that config's latest run")
@@ -146,8 +150,11 @@ def main():
     logged_splits = logged_ctcvr_splits(report_cfg)
 
     rows = []
+    # A separate evaluator explicitly binds test predictions to this run.
+    # Validation-only training must still ignore stray legacy test files.
+    evaluated_test = os.path.exists(os.path.join(run_dir, "predictions", "test.provenance.json"))
     report_splits = (("train", "val", "test")
-                     if report_cfg.get("training", {}).get("evaluate_test", True)
+                     if report_cfg.get("training", {}).get("evaluate_test", True) or evaluated_test
                      else ("train", "val"))
     for split in report_splits:
         parquet = os.path.join(run_dir, "predictions", f"{split}.parquet")
@@ -168,6 +175,9 @@ def main():
     if not rows:
         raise SystemExit(f"no predictions or metrics found in {run_dir}")
     _attach_logged_pctr_source(rows, read_run(run_dir).get("logged_pctr"))
+    if args.include_logged:
+        from evaluation.logged_ctcvr import logged_metric_rows
+        rows += logged_metric_rows(run_dir)
 
     hdr = f"{'split':<6} {'pop':<12} {'rows':>12} {'pos':>10} " \
           f"{'AUC':>10} {'PR-AUC':>11} {'NE':>10} {'CE':>10}"
@@ -175,7 +185,8 @@ def main():
     print("-" * len(hdr))
     for r in rows:
         print(f"{r['split']:<6} {r['population']:<12} {r['rows']:>12,} {r['positives']:>10,} "
-              f"{r['auc']:>10.6f} {r['pr_auc']:>11.6f} {r['ne']:>10.6f} {r['ce']:>10.6f}")
+              f"{r['auc']:>10.6f} {r['pr_auc']:>11.6f} {r['ne']:>10.6f} {r['ce']:>10.6f}"
+              + (f"  [{r['pctr_model']}]" if "pctr_model" in r else ""))
     for r in rows:
         if r["population"] == "CTCVR-logged":
             print(f"  {r['split']} CTCVR-logged: p from dcn run {r['logged_pctr_run']}, "
@@ -201,7 +212,7 @@ def main():
         if test:
             print(f"Test CTR AUC delta: {test['auc'] - _PAPER_CNN_ATTENTION_CTR_AUC:+.6f}")
 
-    out = os.path.join(run_dir, "metrics.json")
+    out = os.path.join(run_dir, "metrics_combined.json" if args.include_logged else "metrics.json")
     with open(out, "w") as f:
         json.dump(rows, f, indent=2)
     print(f"\nwrote {out}")

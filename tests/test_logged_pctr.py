@@ -261,7 +261,7 @@ def test_evaluate_esmm_refuses_logged_ctcvr_without_p():
 
 
 def _real_block():
-    with open(os.path.join(CODE_DIR, "configs", "esmm.yaml")) as f:
+    with open(os.path.join(CODE_DIR, "configs", "esmm", "eval_dcn_matched_stats_wd3e6.yaml")) as f:
         block = yaml.safe_load(f)["logged_pctr"]
     # Exercise the loader independently of which splits the model consumes.
     folder = os.path.dirname(block["predictions"]["test"])

@@ -31,7 +31,7 @@ from test_evaluate import _make_synthetic_batch
 
 ROOT = Path(__file__).resolve().parents[2]
 CODE = ROOT / "code"
-CONFIG = CODE / "configs_downsampled/esmm.yaml"
+CONFIG = CODE / "configs_downsampled/esmm/train.yaml"
 
 
 # Sampling and posterior unit tests
@@ -428,7 +428,7 @@ def test_real_data_train_and_reexport(encoded, tmp_path):
     """Actual CLI train, test scoring, then re-export using a conflicting config."""
     encoded_dir, _, _ = encoded
     cfg = load_config(CONFIG)
-    cfg["training"].update(epochs=1, batch_size=64, eval_batch_size=128, gpus=0,
+    cfg["training"].update(epochs=1, batch_size=64, eval_batch_size=128, gpus=0, evaluate_test=True,
                            out_dir=str(tmp_path / "runs"), save_predictions=True)
     fields = json.loads((Path(encoded_dir) / "field_ids.json").read_text())
     cfg["model_params"] = {"emb_dim": 2, "tower_dims": [2 * len(fields), 8, 2], "aux_weight": 1.0}

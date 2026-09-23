@@ -1,13 +1,14 @@
 """Training entrypoint.
 
 Usage:
-    python scripts/train.py --config configs/dcn.yaml
+    python scripts/train.py --config configs/dcn_matched_stats_wd3e6/train.yaml
 
 Prerequisites:
-    python scripts/preprocess.py --config configs/dcn.yaml  (run once)
+    python scripts/preprocess.py --config configs/dcn_matched_stats_wd3e6/train.yaml  (run once)
 
 Orchestrates: load config → start a run folder → load encoded dataset →
-build model → fit → export or score test → report metrics → update the pointers.
+build model → fit → report train/validation → update the pointers.
+Legacy configs can additionally evaluate test; active recipes use evaluate_run.py.
 All training logic lives in training/trainer.py; the run folder layout and
 pointer files are described in training/runs.py.
 """
@@ -103,7 +104,7 @@ def main():
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
 
     parser = argparse.ArgumentParser(description="Train a recommendation model on Ali-CCP.")
-    parser.add_argument("--config", required=True, help="Path to YAML config (e.g. configs/dcn.yaml)")
+    parser.add_argument("--config", required=True, help="Path to YAML config (e.g. configs/dcn_matched_stats_wd3e6/train.yaml)")
     parser.add_argument("--best-models", default=os.path.join(_CODE_DIR, "best_models.yaml"),
                         help="git-tracked record of each model's best run")
     args = parser.parse_args()

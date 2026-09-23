@@ -13,7 +13,7 @@ Configurable architecture used by the Ali-CCP experiments:
 
 Loss: single-task BCE-with-logits on the click label; no CTCVR term.
 
-Architecture hyperparameters are passed at construction; see configs/dcn.yaml for defaults.
+Architecture hyperparameters are passed at construction; see configs/dcn_matched_stats_wd3e6/train.yaml.
 """
 
 import math

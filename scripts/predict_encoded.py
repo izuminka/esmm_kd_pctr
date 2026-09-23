@@ -1,10 +1,10 @@
 """Export predictions for one encoded split, or only score it, in its own process.
 
 Usage:
-    python scripts/predict_encoded.py --config configs/dcn.yaml --split test
-    python scripts/predict_encoded.py --config configs/dcn.yaml --split val \
+    python scripts/predict_encoded.py --config configs/dcn_matched_stats_wd3e6/train.yaml --split test
+    python scripts/predict_encoded.py --config configs/dcn_matched_stats_wd3e6/train.yaml --split val \
         --run-dir artifacts/dcn/20260916T020356Z
-    python scripts/predict_encoded.py --config configs/esmm.yaml --split test --metrics-only
+    python scripts/predict_encoded.py --config configs/esmm/train.yaml --split test --metrics-only
 
 Reads <run>/best.pt and writes <run>/predictions/<split>.parquet, for the
 model's latest run unless --run-dir names one. --metrics-only writes the split's

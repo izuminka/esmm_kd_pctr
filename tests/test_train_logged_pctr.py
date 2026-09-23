@@ -249,6 +249,7 @@ def test_an_esmm_config_without_a_logged_pctr_source_is_refused(logged_runs):
     tmp = logged_runs["tmp"]
     cfg = yaml.safe_load(open(tmp / "configs" / "esmm_native_select.yaml"))
     del cfg["logged_pctr"]
+    cfg["evaluation"] = {"is_logged_ctcvr": True}  # Explicit legacy opt-in needs a source.
     path = _write(tmp, "esmm_no_source", cfg)
 
     done = _train(path, logged_runs["best_file"])

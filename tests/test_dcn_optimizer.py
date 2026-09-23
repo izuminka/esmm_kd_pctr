@@ -11,7 +11,7 @@ from training.trainer import Trainer
 
 
 def config(tmp_path):
-    cfg = load_config(Path(__file__).parents[1] / "configs/dcn_matched_stats_wd3e6.yaml")
+    cfg = load_config(Path(__file__).parents[1] / "configs/dcn_matched_stats_wd3e6/train.yaml")
     cfg["training"].update(gpus=0, out_dir=str(tmp_path))
     return cfg
 

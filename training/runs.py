@@ -1,7 +1,7 @@
 """Run directories, each model's `latest` pointer, and the best-model record.
 
 Layout under the artifacts root (cfg["training"]["out_dir"]), where <name> is
-the config file's name (configs/<name>.yaml):
+the model directory (configs/<name>/train.yaml), or a legacy flat config stem:
 
     <name>/latest.json        the most recent run that finished
     <name>/<run id>/          one folder per run, never rewritten after it ends
@@ -143,12 +143,9 @@ def read_run(run_dir: str) -> dict:
 
 
 def run_name(config_path: str) -> str:
-    """A run's name is its config file's name: configs/<name>.yaml runs under <name>/.
-
-    Several configs can share one model class (say, loss variants of ESMM); naming
-    runs by config keeps their folders, latest pointers and best entries apart.
-    """
-    return os.path.splitext(os.path.basename(config_path))[0]
+    """Use the parent model directory for train.yaml; retain flat-config names."""
+    stem = os.path.splitext(os.path.basename(config_path))[0]
+    return os.path.basename(os.path.dirname(os.path.abspath(config_path))) if stem == "train" else stem
 
 
 def start_run(artifacts_root: str, cfg: dict, config_path: str, code_dir: str,

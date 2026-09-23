@@ -20,7 +20,7 @@ Speed strategy:
   - Train and val are encoded in a SINGLE pass over the train skeleton CSV.
 
 Usage:
-    python scripts/preprocess.py --config configs/dcn.yaml
+    python scripts/preprocess.py --config configs/dcn_matched_stats_wd3e6/train.yaml
 
 Output (under cfg.data.encoded_dir, relative to project root):
     common_train/{field_id}_ids.npy, {field_id}_weights.npy, {field_id}_offsets.npy

@@ -41,7 +41,9 @@ def report(study: Path, root: Path) -> Path:
         metrics = {r["population"]: r for r in json.loads((run_dir / "metrics.json").read_text())
                    if r["split"] == "test"}
         for key, label in populations.items():
-            metric = metrics[key]  # fail if any requested population is missing
+            if key == "CTCVR-logged" and key not in metrics:
+                continue  # Native-only training has no logged evaluation yet.
+            metric = metrics[key]  # Required native populations must still exist.
             counts = (metric["rows"], metric["positives"])
             if census.setdefault(key, counts) != counts:
                 raise ValueError(f"{arm}: inconsistent test census for {key}")

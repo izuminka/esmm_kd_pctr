@@ -74,7 +74,7 @@ memory (preferably an allocated GPU):
 
 ```bash
 code/.venv/bin/python code/scripts/train.py \
-  --config code/configs/cnn_attention.yaml \
+  --config code/configs_old/cnn_attention/train.yaml \
   --best-models artifacts/cnn_attention_best_models.yaml
 ```
 

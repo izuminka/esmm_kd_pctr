@@ -24,7 +24,7 @@ CODE_DIR = Path(__file__).resolve().parents[1]
 
 
 def _config():
-    return yaml.safe_load((CODE_DIR / "configs/cnn_attention.yaml").read_text())
+    return yaml.safe_load((CODE_DIR / "configs_old/cnn_attention/train.yaml").read_text())
 
 
 def _run(script, *args):

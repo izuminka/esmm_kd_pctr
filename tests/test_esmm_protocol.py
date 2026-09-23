@@ -16,10 +16,11 @@ CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
 def test_matched_cohort_arms_differ_only_in_training_cohort():
-    full = load_config(CONFIGS / "esmm.yaml")
+    full = load_config(CONFIGS / "esmm/train.yaml")
+    assert full["training"].pop("evaluate_test") is False
     for name, fraction in (("esmm_half", .5), ("esmm_third", "1/3"),
                            ("esmm_quarter", .25)):
-        cfg = load_config(CONFIGS / f"{name}.yaml")
+        cfg = load_config(CONFIGS.parent / "configs_old" / name / "train.yaml")
         assert cfg["data"].pop("train_cohort")["fraction"] == fraction
         if name == "esmm_quarter":
             # Historical quarter config retains its original test-only teacher.
@@ -31,19 +32,20 @@ def test_matched_cohort_arms_differ_only_in_training_cohort():
     assert full["training"]["checkpoint_metric"] == "ctcvr_ne"
     assert full["training"]["keep_checkpoint"] == "best"
     assert full["training"]["early_stopping"] == {"enabled": False, "patience": 2, "min_delta": 0.0}
-    assert set(full["logged_pctr"]["predictions"]) == {"test"}
+    assert "logged_pctr" not in full
+    assert "evaluation" not in full
 
 
-@pytest.mark.parametrize("config", sorted(CONFIGS.glob("esmm*.yaml")), ids=lambda p: p.stem)
+@pytest.mark.parametrize("config", sorted(CONFIGS.glob("esmm*/train.yaml")), ids=lambda p: p.parent.name)
 def test_native_and_logged_configs_use_their_prescribed_validation_score(config):
     cfg = load_config(config)
     logged = cfg["model"] == "esmm_logged_pctr"
     native_metric = "ctcvr_ne"
-    if config.stem.startswith("esmm_ctr_reference_"):
+    if config.parent.name.startswith("esmm_ctr_reference_"):
         native_metric = "ctr_ne"
         assert cfg["training"]["evaluate_test"] is False
         assert cfg["training"]["load_test"] is False
-    kd_ne = config.stem.startswith(("esmm_logged_pctr_kd_teacher", "esmm_logged_pctr_kd05", "esmm_logged_pctr_kd03", "esmm_logged_pctr_kd07")) and "2x_aux" not in config.stem
+    kd_ne = config.parent.name.startswith(("esmm_logged_pctr_kd_teacher", "esmm_logged_pctr_kd05", "esmm_logged_pctr_kd03", "esmm_logged_pctr_kd07")) and "2x_aux" not in config.parent.name
     logged_metric = "logged_ctcvr_ne" if kd_ne else "logged_ctcvr_prauc"
     assert cfg["training"]["checkpoint_metric"] == (logged_metric if logged else native_metric)
     assert ("val" in logged_ctcvr_splits(cfg)) == logged
@@ -51,7 +53,8 @@ def test_native_and_logged_configs_use_their_prescribed_validation_score(config)
 
 
 def tiny_cfg(tmp_path):
-    cfg = load_config(CONFIGS / "esmm.yaml")
+    cfg = load_config(CONFIGS / "esmm/train.yaml")
+    cfg["evaluation"] = {"is_logged_ctcvr": True}  # Exercise explicit legacy routing.
     cfg["training"].update(gpus=0, batch_size=3, eval_batch_size=3, out_dir=str(tmp_path))
     cfg["model_params"] = {"emb_dim": 2, "tower_dims": [2, 4, 2]}
     return cfg

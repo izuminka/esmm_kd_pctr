@@ -69,6 +69,8 @@ def logged_runs(encoded, tmp_path_factory):
         n_fields = len(json.load(f))
     esmm_params = {"emb_dim": 4, "tower_dims": [4 * n_fields, 8, 2]}
     arms = {
+        "esmm_logged_pctr_kd_tau": ("esmm_logged_pctr", "logged_ctcvr_prauc", True,
+                                    {**esmm_params, "objective": "kd_tau", "alpha": 0.5, "aux_weight": 1.0}),
         "esmm_logged_pctr_kd": ("esmm_logged_pctr", "logged_ctcvr_prauc", True,
                                 {**esmm_params, "objective": "kd", "alpha": 0.5, "aux_weight": 2.0}),
         "esmm_logged_pctr_product": ("esmm_logged_pctr", "logged_ctcvr_prauc", False,
@@ -84,7 +86,8 @@ def logged_runs(encoded, tmp_path_factory):
                                       {s: f for s, f in logged_pctr["predictions"].items()
                                        if s == "test" or (s == "train" and model == "esmm_logged_pctr")
                                        or (s == "val" and model == "esmm_logged_pctr")}},
-                                  "data": {"encoded_dir": enc_dir}})
+                                  "data": {"encoded_dir": enc_dir, **({"nonclick_sampling": {"rate": .5, "seed": 2026}}
+                                           if params.get("objective") == "kd_tau" else {})}})
         done = _train(path, best_file)
         assert done.returncode == 0, f"{name}: {done.stderr[-3000:]}"
         folders[name] = runs.resolve_run(str(artifacts), name)
@@ -113,7 +116,7 @@ def logged_runs(encoded, tmp_path_factory):
             "arms": arms, "enc_dir": enc_dir}
 
 
-ESMM_RUNS = ["esmm_logged_pctr_kd", "esmm_logged_pctr_product", "esmm_native_select", "esmm_native_2x"]
+ESMM_RUNS = ["esmm_logged_pctr_kd_tau", "esmm_logged_pctr_kd", "esmm_logged_pctr_product", "esmm_native_select", "esmm_native_2x"]
 
 
 @pytest.mark.parametrize("name", ESMM_RUNS)
@@ -330,3 +333,23 @@ def test_a_finished_run_stays_finished_when_the_bookkeeping_fails(logged_runs, t
     run_dir = runs.resolve_run(artifacts, "esmm_no_logged")  # only finished runs are latest
     run = runs.read_run(run_dir)
     assert run["status"] == runs.FINISHED and "IsADirectoryError" in run["error"]
+
+
+def test_tau_checkpoint_and_retained_teacher_alignment(logged_runs):
+    from pathlib import Path
+    import numpy as np
+    from scripts.predict_encoded import build_model
+    run = Path(logged_runs['runs']['esmm_logged_pctr_kd_tau'])
+    ckpt = torch.load(run/'best.pt', weights_only=False)
+    assert ckpt['nonclick_sampling'] == {'rate': .5, 'seed': 2026}
+    restored = build_model(ckpt['model_type'], ckpt['vocab_sizes'], ckpt['model_params'])
+    assert restored.objective == 'kd_tau' and restored.nonclick_rate == .5
+    enc = Path(logged_runs['enc_dir'])/'train'
+    y = np.load(enc/'y.npy')
+    ids = np.load(enc/'sample_id.npy')
+    keep = (y == 1) | (np.random.default_rng(2026).random(len(y)) < .5)
+    saved = pd.read_parquet(run/'predictions/train.parquet')
+    assert np.array_equal(saved.sample_id.to_numpy(), ids[keep])
+    saved_val = pd.read_parquet(run/'predictions/val.parquet')
+    teacher = pd.read_parquet(logged_runs['logged_pctr']['predictions']['val']).set_index('sample_id')
+    assert np.array_equal(saved_val.p.to_numpy(), teacher.loc[saved_val.sample_id, 'score'].to_numpy())

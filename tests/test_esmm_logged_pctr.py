@@ -191,3 +191,58 @@ def test_ctr_gradient_depends_on_clicks_only_when_alpha_positive(real_batch, alp
         torch.equal(a, b) for a, b in zip(ctr_tower_grads(y), ctr_tower_grads(y_flipped))
     )
     assert is_unchanged != is_click_dependent
+
+
+@pytest.mark.parametrize('rate', [.5, .25, .1, .05])
+@pytest.mark.parametrize('alpha', [0., .5, 1.])
+def test_kd_tau_equation21_loss_and_gradients(rate, alpha):
+    model = LoggedPctrESMM(**TINY, objective='kd_tau', alpha=alpha,
+                           aux_weight=1., nonclick_rate=rate)
+    q, v, p = [x.double().clone().requires_grad_() for x in (Q, V, P)]
+    loss = model.loss(q, v, Y.double(), Z.double(), p)
+    expected = np.mean([alpha*bce(y, qi) + (1-alpha)*bce(pi/(pi+rate*(1-pi)), qi)
+                        + bce(y*z, qi*vi)
+                        for y,z,qi,vi,pi in zip(Y.tolist(),Z.tolist(),q.tolist(),v.tolist(),p.tolist())])
+    assert loss.item() == pytest.approx(expected, rel=1e-12)
+    loss.backward()
+    target = alpha*Y.double()+(1-alpha)*(p.detach()/(p.detach()+rate*(1-p.detach())))
+    product = q.detach()*v.detach()
+    grad_product = (product-Y.double()*Z.double())/(product*(1-product))/len(Q)
+    assert torch.allclose(q.grad, (q.detach()-target)/(q.detach()*(1-q.detach()))/len(Q)+grad_product*v.detach())
+    assert torch.allclose(v.grad, grad_product*q.detach())
+    assert p.grad is None
+
+
+@pytest.mark.parametrize('kwargs', [{}, {'nonclick_rate': 1}, {'nonclick_rate': 1.0}])
+def test_kd_tau_requires_downsampling(kwargs):
+    with pytest.raises(ValueError, match='strictly below 1'):
+        LoggedPctrESMM(**TINY, objective='kd_tau', alpha=.5, aux_weight=1., **kwargs)
+
+
+@pytest.mark.parametrize('rate', [None, 1, 1.0])
+def test_kd_tau_build_rejects_full_rate(rate):
+    from scripts.train import build_model
+    cfg = {'model': 'esmm_logged_pctr', 'model_params': {
+        'objective': 'kd_tau', 'alpha': .5, 'aux_weight': 1.,
+        'emb_dim': 4, 'tower_dims': [4, 3, 2]}}
+    if rate is not None:
+        cfg['data'] = {'nonclick_sampling': {'rate': rate, 'seed': 2026}}
+    with pytest.raises(ValueError, match='strictly below 1'):
+        build_model(cfg, {'f1': 5})
+
+
+@pytest.mark.parametrize('rate', [0, -1, 1.1, float('nan'), float('inf'), True])
+def test_kd_tau_rejects_invalid_rates(rate):
+    with pytest.raises(ValueError):
+        LoggedPctrESMM(**TINY, objective='kd_tau', alpha=.5, aux_weight=1., nonclick_rate=rate)
+
+
+def test_kd_tau_build_uses_single_sampling_config():
+    from scripts.train import build_model
+    cfg = {'model':'esmm_logged_pctr', 'model_params':{'objective':'kd_tau', 'alpha':.5,
+           'aux_weight':1., 'emb_dim':4,'tower_dims':[4,3,2]},
+           'data':{'nonclick_sampling':{'rate':.25,'seed':2026}}}
+    assert build_model(cfg, {'f1':5}).nonclick_rate == .25
+    cfg['model_params']['nonclick_rate'] = .5
+    with pytest.raises(ValueError, match='configure retention only'):
+        build_model(cfg, {'f1':5})

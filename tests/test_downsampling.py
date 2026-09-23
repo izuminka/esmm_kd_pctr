@@ -575,3 +575,36 @@ def test_tau_sampling_config():
         cfg["model_params"]["objective"] = objective
         with pytest.raises(ValueError, match="kd_tau"):
             downsampling.from_config(cfg)
+
+
+@pytest.mark.parametrize("rate", [None, 1, 1.0, .5, .25, .1, .05])
+def test_training_model_params_derives_tau_rate_without_mutation(rate):
+    cfg = {"model": "esmm_logged_pctr", "model_params": {
+        "objective": "kd_tau", "alpha": .5, "aux_weight": 1.}}
+    if rate is not None:
+        cfg["data"] = {"nonclick_sampling": {"rate": rate, "seed": 2026}}
+    original = copy.deepcopy(cfg)
+    params = downsampling.training_model_params(cfg)
+    assert params == {**cfg["model_params"], "nonclick_rate": 1. if rate is None else rate}
+    assert cfg == original
+    assert params is not cfg["model_params"]
+
+
+@pytest.mark.parametrize("model,objective", [("esmm", None), ("dcn", None),
+                                             ("esmm_logged_pctr", "kd"),
+                                             ("esmm_logged_pctr", "product")])
+def test_training_model_params_preserves_other_objectives(model, objective, monkeypatch):
+    cfg = {"model": model, "model_params": {"emb_dim": 4}}
+    if objective:
+        cfg["model_params"]["objective"] = objective
+    def forbidden(*args):
+        raise AssertionError("unrelated model must bypass sampling setup")
+    monkeypatch.setattr(downsampling, "from_config", forbidden)
+    assert downsampling.training_model_params(cfg) == cfg["model_params"]
+
+
+def test_training_model_params_rejects_duplicate_rate():
+    cfg = {"model": "esmm_logged_pctr", "model_params": {
+        "objective": "kd_tau", "nonclick_rate": .5}}
+    with pytest.raises(ValueError, match="configure retention only"):
+        downsampling.training_model_params(cfg)

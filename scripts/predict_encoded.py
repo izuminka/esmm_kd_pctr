@@ -114,7 +114,8 @@ def main():
             run_cfg = yaml.safe_load(f)
     else:
         run_cfg = cfg
-    params = (ckpt["model_params"] if ckpt["model_type"] == "cnn_attention"
+    params = (ckpt["model_params"] if (ckpt["model_type"] == "cnn_attention"
+              or ckpt.get("model_params", {}).get("objective") == "kd_tau")
               else run_cfg.get("model_params", {}))
     model = build_model(ckpt["model_type"], ckpt["vocab_sizes"], params).to(device)
     model.load_state_dict(ckpt["model_state_dict"])

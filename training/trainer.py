@@ -308,7 +308,8 @@ class Trainer:
                     }
                 if self.model_name == "esmm_logged_pctr":
                     ckpt_data["model_params"].update(
-                        objective=model.objective, alpha=model.alpha, aux_weight=model.aux_weight)
+                        objective=model.objective, alpha=model.alpha,
+                        aux_weight=model.aux_weight, nonclick_rate=model.nonclick_rate)
                 if self.is_cnn_attention:
                     ckpt_data["model_params"] = model.model_params
                 if self.logged_pctr_source is not None:

@@ -66,7 +66,7 @@ def build_model(cfg: dict, vocab_sizes: dict):
         return ESMM(vocab_sizes, **params)
     if cfg["model"] == "esmm_logged_pctr":
         from models.esmm_logged_pctr import LoggedPctrESMM
-        return LoggedPctrESMM(vocab_sizes, **params)
+        return LoggedPctrESMM(vocab_sizes, **downsampling.training_model_params(cfg))
     if cfg["model"] == "cnn_attention":
         from models.cnn_attention import CNNAttention
         return CNNAttention(vocab_sizes, **params)

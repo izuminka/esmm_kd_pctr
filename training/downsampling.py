@@ -39,6 +39,21 @@ def from_config(cfg):
     return _validate_spec(spec)
 
 
+def training_model_params(cfg):
+    """Derive KD-tau's constructor rate from the single sampling config.
+
+    Other objectives keep their parameters unchanged. Checkpoint reconstruction
+    uses saved constructor parameters directly, rather than this config adapter.
+    """
+    params = dict(cfg.get("model_params", {}))
+    if cfg["model"] == "esmm_logged_pctr" and params.get("objective") == "kd_tau":
+        if "nonclick_rate" in params:
+            raise ValueError("configure retention only in data.nonclick_sampling")
+        sampling = from_config(cfg)
+        params["nonclick_rate"] = sampling["rate"] if sampling else DEFAULT_NONCLICK_RATE
+    return params
+
+
 def restrict(split, spec):
     """Reuse the cohort view; membership is fixed by encoded row order and seed."""
     spec = _validate_spec(spec)

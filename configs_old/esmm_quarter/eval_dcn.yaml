@@ -1,0 +1,6 @@
+pctr_model: dcn
+logged_pctr:
+  dcn_run: artifacts/dcn/20260916T232126Z
+  predictions:
+    test: artifacts/dcn/20260916T232126Z/predictions/test.parquet
+  score_column: score

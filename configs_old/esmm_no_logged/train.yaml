@@ -27,9 +27,6 @@ model_params:
   tower_dims: [460, 360, 200, 80, 2]
   aux_weight: 1.0  # weight on the CTR term; 1 is the canonical ESMM loss
 
-evaluation:
-  is_logged_ctcvr: false  # plain ESMM: no logged pCTR, so no CTCVR-logged
-
 data:
   # paths relative to project root
   csv_dir: ali-ccp/extracted   # directory containing common_features_{train,test}.csv etc.

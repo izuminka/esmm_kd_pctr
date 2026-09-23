@@ -1,9 +1,7 @@
-# ESMM half control (paper Table 2, "ESMM half"): canonical ESMM on the fixed,
-# label-independent 19,035,179-row half cohort. Identical to esmm.yaml except for
-# data.train_cohort. Validation and test stay the full populations.
 model: esmm
 
 training:
+  evaluate_test: false  # test belongs to the separate evaluation job
   epochs: 5           # common cap; each arm retains its best validation checkpoint
   batch_size: 65536   # paper's global batch (4 replicas x 16,384); here one GPU
   eval_batch_size: 65536  # eval runs under no_grad, so it fits a bigger batch
@@ -31,25 +29,8 @@ model_params:
   tower_dims: [460, 360, 200, 80, 2]
   aux_weight: 1.0  # weight on the CTR term; 1 is the canonical ESMM loss
 
-# Frozen DCN-V2 pCTR p, used only for the test CTCVR-logged (p*v) report.
-# It is not used for training, validation or checkpoint selection.
-logged_pctr:
-  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z  # the dcn entry in best_models.yaml
-  predictions:  # only required splits; joined by sample_id
-    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
-  score_column: score
-
-evaluation:
-  is_logged_ctcvr: true  # report p*v only on test; never select on it
-
 data:
   # paths relative to project root
   csv_dir: ali-ccp/extracted   # directory containing common_features_{train,test}.csv etc.
   encoded_dir: ali-ccp/encoded # preprocessed numpy arrays (run scripts/preprocess.py once)
   # field_ids: omit to use all fields discovered in training data
-  train_cohort:          # see training/cohorts.py for the selection rule
-    fraction: 0.5        # paper: 19,035,179 of 38,070,359 training rows
-    ranks: 4             # paper's four data-parallel replicas set the balanced ranges
-    block_size: 65536    # rows per block permuted into the stream; the paper's own
-                         # block boundaries are unpublished, so size matches, rows may not
-    seed: 42             # paper: the block inventory is permuted with seed 42

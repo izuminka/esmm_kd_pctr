@@ -33,17 +33,6 @@ model_params:
   tower_dims: [460, 360, 200, 80, 2]
   aux_weight: 1.0  # weight on the CTR term; 1 is the canonical ESMM loss
 
-# Frozen DCN-V2 pCTR p, used only for the test CTCVR-logged (p*v) report.
-# It is not used for training, validation or checkpoint selection.
-logged_pctr:
-  dcn_run: artifacts/dcn/20260916T232126Z  # the dcn entry in best_models.yaml
-  predictions:  # only required splits; joined by sample_id
-    test: artifacts/dcn/20260916T232126Z/predictions/test.parquet
-  score_column: score
-
-evaluation:
-  is_logged_ctcvr: true  # report p*v only on test; never select on it
-
 data:
   # paths relative to project root
   csv_dir: ali-ccp/extracted   # directory containing common_features_{train,test}.csv etc.

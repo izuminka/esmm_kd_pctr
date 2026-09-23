@@ -26,16 +26,6 @@ model_params:
   tower_dims: [460, 360, 200, 80, 2]
   aux_weight: 1.0
 
-# Logged pCTR is used only for the test CTCVR-logged (p*v) report.
-logged_pctr:
-  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z
-  predictions:
-    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
-  score_column: score
-
-evaluation:
-  is_logged_ctcvr: true
-
 data:
   csv_dir: ali-ccp/extracted
   encoded_dir: ali-ccp/encoded

@@ -1,6 +1,7 @@
 # Full-data KD: alpha=0.3 is the click-label weight; teacher weight=0.7.
 model: esmm_logged_pctr
 training:
+  evaluate_test: false  # test belongs to the separate evaluation job
   epochs: 5
   batch_size: 65536
   eval_batch_size: 65536

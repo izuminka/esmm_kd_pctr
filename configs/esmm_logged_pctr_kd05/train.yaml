@@ -1,9 +1,10 @@
-# KD-teacher: the auxiliary CTR head learns only from the logged-pCTR teacher.
+# KD-0.5: hard-click and logged-pCTR teacher CTR losses weighted equally.
 # One arm of the logged-pCTR suite (paper Table 2, tab:aliccp-quarter-logged-pctr).
 # This run uses the full training split.
 model: esmm_logged_pctr
 
 training:
+  evaluate_test: false  # test belongs to the separate evaluation job
   epochs: 5           # paper caps training at five epochs
   batch_size: 65536   # paper's global batch (4 replicas x 16,384); here one GPU
   eval_batch_size: 65536  # eval runs under no_grad, so it fits a bigger batch
@@ -30,7 +31,7 @@ model_params:
   emb_dim: 20
   tower_dims: [460, 360, 200, 80, 2]
   objective: kd  # aux_weight * BCE(q, alpha*y + (1-alpha)*p) + BCE(y*z, q*v)
-  alpha: 0.0  # logged-pCTR teacher only
+  alpha: 0.5  # half hard clicks, half logged-pCTR teacher
   aux_weight: 1.0  # aux-CTR term at its canonical weight
 
 # Frozen DCN-V2 pCTR p: detached and never a model input. It enters the loss as

@@ -19,6 +19,7 @@ if _CODE_DIR not in sys.path:
 
 from data.raw import is_validation, iter_impressions
 from training.trainer import Trainer, save_predictions, save_esmm_predictions
+from training import downsampling
 from training.downsampling import NONCLICK_SAMPLING_KEY
 
 
@@ -82,7 +83,8 @@ def main():
     trainer = Trainer(cfg, _ROOT_DIR)
     model = model.to(trainer.device)
     if ckpt["model_type"] == "esmm":
-        ids, ys, zs, qs, vs = trainer.predict_esmm(model, imps, ckpt["vocabs"], ckpt["field_ids"])
+        ids, ys, zs, qs, vs = trainer.predict_esmm(model, imps, ckpt["vocabs"], ckpt["field_ids"],
+                                              is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[args.split])
         save_esmm_predictions(ids, ys, zs, qs, vs, out_path)
     else:
         ids, ys, zs, scores = trainer.predict(model, imps, ckpt["vocabs"], ckpt["field_ids"])

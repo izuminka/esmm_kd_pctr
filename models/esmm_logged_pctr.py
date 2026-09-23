@@ -18,7 +18,7 @@ import torch
 import torch.nn.functional as F
 
 from models.esmm import _PAPER_TOWER_DIMS, EPS, ESMM
-from training.downsampling import DEFAULT_NONCLICK_RATE, retained_ctr, validate_rate
+from training.downsampling import DEFAULT_NONCLICK_RATE, logged_ctr_for_space, validate_rate
 
 OBJECTIVES = ("kd", "kd_tau", "product")
 
@@ -74,15 +74,21 @@ class LoggedPctrESMM(ESMM):
         v: torch.Tensor,         # pCVR head, the output all objectives train
         y: torch.Tensor,         # click label
         z: torch.Tensor,         # conversion label; y*z is the CTCVR label
-        p: torch.Tensor,         # frozen logged pCTR, detached below
+        p: torch.Tensor,         # frozen full-population logged pCTR, detached below
+        *, is_ctr_downsampled_space: bool = True,
     ) -> torch.Tensor:
-        """Batch-mean objective, eps-clipped products as in `esmm_loss`."""
+        """Batch-mean loss; q is already in the requested CTR space.
+
+        For KD-tau, align the original-space teacher to q when training in
+        downsampled space. This loss never inverse-corrects the student q.
+        """
         p = p.detach()
         if self.objective == "product":
             return F.binary_cross_entropy((p * v).clamp(EPS, 1 - EPS), y * z)
 
-        if self.objective == "kd_tau" and self.nonclick_rate < 1.0:
-            p = retained_ctr(p, self.nonclick_rate)
+        if self.objective == "kd_tau":
+            p = logged_ctr_for_space(
+                p, self.nonclick_rate, is_ctr_downsampled_space=is_ctr_downsampled_space)
         q = q.clamp(EPS, 1 - EPS)
         qv = (q * v).clamp(EPS, 1 - EPS)
         aux = F.binary_cross_entropy(q, self.alpha * y + (1 - self.alpha) * p)

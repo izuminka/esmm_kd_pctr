@@ -113,7 +113,8 @@ def test_full_rate_bypasses_all_inference_paths(tmp_path, monkeypatch, rate):
     monkeypatch.setattr(downsampling, "recover_ctr", unexpected)
     monkeypatch.setattr(evaluator, "recover_ctr", unexpected)
     for name in ("train", "val", "test"):
-        _, _, _, scores = trainer._predict_numpy(model, split, split_name=name)
+        _, _, _, scores = trainer._predict_numpy(
+            model, split, split_name=name, is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[name])
         np.testing.assert_array_equal(scores["q"], raw_q.numpy())
         np.testing.assert_array_equal(scores["v"], raw_v.numpy())
         np.testing.assert_array_equal(scores["q"] * scores["v"], (raw_q * raw_v).numpy())
@@ -129,12 +130,18 @@ def test_full_rate_bypasses_all_inference_paths(tmp_path, monkeypatch, rate):
 
 
 @pytest.mark.parametrize("rate", [.05, .5, .999])
-def test_recovery_applied_once_to_ctr_only(tmp_path, monkeypatch, rate):
+@pytest.mark.parametrize("objective", [None, "kd_tau"])
+def test_recovery_applied_once_to_ctr_only(tmp_path, monkeypatch, rate, objective):
     cfg = tiny_cfg(tmp_path)
     cfg["evaluation"]["is_logged_ctcvr"] = False
     cfg["data"]["nonclick_sampling"] = {"rate": rate, "seed": 2026}
     cfg["training"]["batch_size"] = 8
+    if objective:
+        cfg["model"] = "esmm_logged_pctr"
+        cfg["model_params"].update(objective=objective, alpha=.5, aux_weight=1.)
+        cfg["training"]["checkpoint_metric"] = "logged_ctcvr_ne"
     split = TinySplit()
+    split.logged_pctr = torch.full((len(split),), .2)
     model = build_model(cfg, {"f": 8}).eval()
     trainer = Trainer(cfg, str(tmp_path))
     batch, y, z = split.get_batch(torch.arange(len(split)))
@@ -153,7 +160,15 @@ def test_recovery_applied_once_to_ctr_only(tmp_path, monkeypatch, rate):
     monkeypatch.setattr(evaluator, "recover_ctr", observed)
     for name in ("train", "val", "test"):
         calls.clear()
-        _, _, _, scores = trainer._predict_numpy(model, split, split_name=name)
+        _, _, _, scores = trainer._predict_numpy(
+            model, split, split_name=name, is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[name])
+        if objective and name == "val":
+            np.testing.assert_array_equal(scores["p"], split.logged_pctr.numpy())
+        if name == "train":
+            assert not calls
+            np.testing.assert_array_equal(scores["q"], raw_q.numpy())
+            np.testing.assert_array_equal(scores["v"], raw_v.numpy())
+            continue
         assert len(calls) == 1
         torch.testing.assert_close(calls[0][0], raw_q, rtol=0, atol=0)
         assert calls[0][1] == rate
@@ -168,6 +183,12 @@ def test_recovery_applied_once_to_ctr_only(tmp_path, monkeypatch, rate):
     assert len(calls) == 1
     np.testing.assert_allclose(q, expected.numpy(), rtol=2e-6)
     np.testing.assert_array_equal(v, raw_v.numpy())
+    calls.clear()
+    _, _, _, q_train, v_train = trainer.predict_esmm(
+        model, rows, {"f": {str(i): i for i in range(1, 9)}}, ["f"], is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space["train"])
+    assert not calls
+    np.testing.assert_array_equal(q_train, raw_q.numpy())
+    np.testing.assert_array_equal(v_train, raw_v.numpy())
     calls.clear()
     evaluator.evaluate_esmm(model, batch, y, z, is_logged_ctcvr=False, nonclick_rate=rate)
     assert len(calls) == 1
@@ -467,7 +488,8 @@ def test_real_data_train_and_reexport(encoded, tmp_path):
         table = pd.read_parquet(run_dir / "predictions" / f"{name}.parquet")
         split = getattr(data, name)
         np.testing.assert_array_equal(table.sample_id, split.sample_ids.numpy())
-        _, _, _, scores = trainer._predict_numpy(model, split, split_name=name)
+        _, _, _, scores = trainer._predict_numpy(
+            model, split, split_name=name, is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[name])
         np.testing.assert_allclose(table.q, scores["q"], rtol=1e-6)
         np.testing.assert_allclose(table.v, scores["v"], rtol=1e-6)
 
@@ -608,3 +630,161 @@ def test_training_model_params_rejects_duplicate_rate():
         "objective": "kd_tau", "nonclick_rate": .5}}
     with pytest.raises(ValueError, match="configure retention only"):
         downsampling.training_model_params(cfg)
+
+
+@pytest.mark.parametrize("split_name", ["train", "val", "test", "custom"])
+@pytest.mark.parametrize("is_ctr_downsampled_space", [False, True])
+def test_score_space_flag_is_independent_of_split(tmp_path, monkeypatch, split_name, is_ctr_downsampled_space):
+    cfg = tiny_cfg(tmp_path)
+    cfg["evaluation"]["is_logged_ctcvr"] = False
+    cfg["data"]["nonclick_sampling"] = {"rate": .25, "seed": 2026}
+    model = build_model(cfg, {"f": 8}).eval()
+    runner = Trainer(cfg, str(tmp_path))
+    split = TinySplit()
+    batch, _, _ = split.get_batch(torch.arange(len(split)))
+    with torch.no_grad():
+        q, v = model(batch)
+    if is_ctr_downsampled_space:
+        def forbidden(*args):
+            raise AssertionError("retained space must bypass recovery")
+        monkeypatch.setattr(downsampling, "recover_ctr", forbidden)
+    _, _, _, scores = runner._predict_numpy(
+        model, split, split_name=split_name, is_ctr_downsampled_space=is_ctr_downsampled_space)
+    expected = q if is_ctr_downsampled_space else (.25*q/(1-q+.25*q))
+    np.testing.assert_allclose(scores["q"], expected.numpy(), rtol=1e-6)
+    np.testing.assert_array_equal(scores["v"], v.numpy())
+
+
+def test_reporting_space_mapping():
+    assert downsampling.is_ctr_downsampled_space == {"train": True, "val": False, "test": False}
+
+
+@pytest.mark.parametrize("is_ctr_downsampled_space", [True, False])
+@pytest.mark.parametrize("rate", [1, 1.0, .5, .05])
+def test_space_helpers_convert_or_preserve_identity(rate, is_ctr_downsampled_space):
+    p = torch.tensor([0., .2, .7, 1.], dtype=torch.float64)
+    q = torch.tensor([0., .4, .8, 1.], dtype=torch.float64)
+    teacher = downsampling.logged_ctr_for_space(p, rate, is_ctr_downsampled_space=is_ctr_downsampled_space)
+    student = downsampling.model_ctr_for_space(q, rate, is_ctr_downsampled_space=is_ctr_downsampled_space)
+    if is_ctr_downsampled_space and rate < 1:
+        torch.testing.assert_close(teacher, p/(p+rate*(1-p)))
+    else:
+        assert teacher is p
+    if not is_ctr_downsampled_space and rate < 1:
+        torch.testing.assert_close(student, rate*q/(1-q+rate*q))
+    else:
+        assert student is q
+    assert downsampling.model_ctr_for_space(None, rate, is_ctr_downsampled_space=is_ctr_downsampled_space) is None
+
+
+@pytest.mark.parametrize("rate", [.5, .25, .1, .05], ids=["50pct", "25pct", "10pct", "5pct"])
+@pytest.mark.parametrize("alpha", [0., .5, 1.], ids=["teacher_only", "mixed_kd", "hard_labels_only"])
+def test_kd_tau_training_and_full_population_evaluation_contract(tmp_path, monkeypatch, rate, alpha):
+    """Exercise real trainer loss, exports, and validation with independent oracles."""
+    from scripts.report_metrics import metric_rows, populations
+
+    cfg = tiny_cfg(tmp_path)
+    cfg["model"] = "esmm_logged_pctr"
+    cfg["model_params"].update(objective="kd_tau", alpha=alpha, aux_weight=1.)
+    cfg["data"]["nonclick_sampling"] = {"rate": rate, "seed": 2026}
+    cfg["training"].update(checkpoint_metric="logged_ctcvr_ne", batch_size=8, eval_batch_size=8)
+    full = TinySplit()
+    full.logged_pctr = torch.tensor([.1, .2, .3, .4, .05, .15, .25, .35], requires_grad=True)
+    original_teacher = full.logged_pctr.detach().clone()
+    retained = downsampling.restrict(full, cfg["data"]["nonclick_sampling"])
+    expected_rows = np.flatnonzero((full.ys.numpy() == 1) |
+                                   (np.random.default_rng(2026).random(len(full)) < rate))
+    np.testing.assert_array_equal(retained.sample_ids.numpy(), full.sample_ids.numpy()[expected_rows])
+    runner = Trainer(cfg, str(tmp_path))
+    model = build_model(cfg, {"f": 8})
+    captured = {}
+
+    def capture_heads(module, inputs, outputs):
+        q, v = outputs
+        q.retain_grad()
+        v.retain_grad()
+        captured.update(q=q, v=v)
+
+    conversions, recoveries = [], []
+    forward_transform, inverse_transform = downsampling.retained_ctr, downsampling.recover_ctr
+
+    def record_teacher(p, rho):
+        conversions.append((p.detach().clone(), rho))
+        return forward_transform(p, rho)
+
+    def record_recovery(q, rho):
+        recoveries.append((q.detach().clone(), rho))
+        return inverse_transform(q, rho)
+
+    monkeypatch.setattr(downsampling, "retained_ctr", record_teacher)
+    monkeypatch.setattr(downsampling, "recover_ctr", record_recovery)
+    hook = model.register_forward_hook(capture_heads)
+    loss = runner._train_step_numpy(model, retained, torch.arange(len(retained)))
+    hook.remove()
+    assert len(conversions) == 1 and conversions[0][1] == rate
+    torch.testing.assert_close(conversions[0][0], original_teacher[expected_rows], rtol=0, atol=0)
+    assert not recoveries  # No inverse correction inside training.
+    assert full.logged_pctr.grad is None
+    torch.testing.assert_close(full.logged_pctr.detach(), original_teacher, rtol=0, atol=0)
+
+    q = captured["q"].detach().double().numpy()
+    v = captured["v"].detach().double().numpy()
+    y = retained.ys.double().numpy()
+    z = retained.zs.double().numpy()
+    p = original_teacher[expected_rows].double().numpy()
+    tau = p / (p + rate * (1-p))
+    target = alpha*y + (1-alpha)*tau
+
+    def bce(labels, scores):
+        return -(labels*np.log(scores)+(1-labels)*np.log1p(-scores)).mean()
+
+    assert loss == pytest.approx(bce(target, q)+bce(y*z, q*v), rel=2e-6)
+    # Independent analytic gradients detect wrong-space q or conversion-product targets.
+    product_gradient = ((q*v-y*z)/(q*v*(1-q*v))) / len(q)
+    np.testing.assert_allclose(captured["q"].grad.numpy(),
+                               (q-target)/(q*(1-q))/len(q)+product_gradient*v, rtol=2e-5, atol=1e-7)
+    np.testing.assert_allclose(captured["v"].grad.numpy(), product_gradient*q, rtol=2e-5, atol=1e-7)
+
+    for name, split, expected_downsampled in (("train", retained, True), ("val", full, False), ("test", full, False)):
+        assert downsampling.is_ctr_downsampled_space[name] is expected_downsampled
+        enc, ys, zs = split.get_batch(torch.arange(len(split)))
+        with torch.no_grad():
+            raw_q, raw_v = model(enc)
+        recoveries.clear()
+        ids, actual_y, actual_z, scores = runner._predict_numpy(
+            model, split, split_name=name,
+            is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[name])
+        np.testing.assert_array_equal(ids, split.sample_ids.numpy())
+        np.testing.assert_array_equal(actual_y, ys.numpy())
+        np.testing.assert_array_equal(actual_z, zs.numpy())
+        np.testing.assert_array_equal(scores["v"], raw_v.numpy())
+        if name == "train":
+            assert not recoveries
+            np.testing.assert_array_equal(scores["q"], raw_q.numpy())
+        else:
+            assert len(ids) == len(full)  # Full population, including every nonclick.
+            assert len(recoveries) == 1 and recoveries[0][1] == rate
+            np.testing.assert_array_equal(recoveries[0][0].numpy(), raw_q.numpy())
+            expected_q = rate*raw_q.double().numpy()/(1-raw_q.double().numpy()+rate*raw_q.double().numpy())
+            np.testing.assert_allclose(scores["q"], expected_q, rtol=2e-6)
+            np.testing.assert_array_equal(scores["p"], original_teacher.numpy())
+            scored = populations(cfg["model"], actual_y, actual_z, scores)
+            np.testing.assert_allclose(scored["CTCVR"][0], expected_q*raw_v.numpy(), rtol=2e-6)
+            np.testing.assert_allclose(scored["CTCVR-logged"][0], original_teacher.numpy()*raw_v.numpy(), rtol=1e-6)
+            metrics = {r["population"]: r for r in metric_rows(name, cfg["model"], actual_y, actual_z, scores)}
+            ctr_labels = actual_y.astype(float)
+            base = ctr_labels.mean()
+            expected_ne = bce(ctr_labels, expected_q)/(-base*np.log(base)-(1-base)*np.log1p(-base))
+            assert metrics["CTR"]["ne"] == pytest.approx(expected_ne, rel=2e-6)
+            assert metrics["CTR"]["ce"] == pytest.approx(expected_q.sum()/ctr_labels.sum(), rel=2e-6)
+            if name == "val":
+                recoveries.clear()
+                selection, extras = runner._val_score_numpy(model, full)
+                labels = actual_y.astype(float)*actual_z.astype(float)
+                base = labels.mean()
+                expected_logged = original_teacher.double().numpy()*raw_v.double().numpy()
+                expected_selection = bce(labels, expected_logged)/(-base*np.log(base)-(1-base)*np.log1p(-base))
+                assert selection == pytest.approx(expected_selection, rel=2e-6)
+                assert extras["val_ctr_ne"] == pytest.approx(expected_ne, rel=2e-6)
+                assert len(recoveries) == 1
+    assert len(conversions) == 1  # Evaluation never re-transforms the logged teacher.

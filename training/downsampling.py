@@ -7,6 +7,10 @@ import torch
 
 from training.cohorts import CohortSplit
 
+# CTR space by split: align the KD-tau teacher for training; recover student
+# CTR for full-population validation/test. Callers pass the selected boolean.
+is_ctr_downsampled_space = {"train": True, "val": False, "test": False}
+
 DEFAULT_NONCLICK_RATE = 1.0
 NONCLICK_SAMPLING_KEY = "nonclick_sampling"
 
@@ -95,3 +99,19 @@ def retained_ctr(p, rate=DEFAULT_NONCLICK_RATE):
     if p.dtype != torch.float64 and rate < torch.finfo(p.dtype).tiny:
         return retained_ctr(p.double(), rate).to(p.dtype)
     return p / (p + rate * (1 - p))
+
+
+def logged_ctr_for_space(p, rate, *, is_ctr_downsampled_space):
+    """Original-space logged CTR -> requested space; false is an exact bypass."""
+    rate = validate_rate(rate)
+    if not is_ctr_downsampled_space or rate == 1:
+        return p
+    return retained_ctr(p, rate)
+
+
+def model_ctr_for_space(q, rate, *, is_ctr_downsampled_space):
+    """Retained-space model CTR -> requested space; true is an exact bypass."""
+    rate = validate_rate(rate)
+    if q is None or is_ctr_downsampled_space or rate == 1:
+        return q
+    return recover_ctr(q, rate)

@@ -46,6 +46,7 @@ def predict_test(run_dir, root, gpus):
     """Reuse native prediction, including saved downsampling correction for q."""
     from scripts.predict_encoded import build_model
     from training.dataset import CommonTable, SplitData
+    from training import downsampling
     from training.downsampling import NONCLICK_SAMPLING_KEY
     from training.trainer import Trainer, resolve_device
 
@@ -63,7 +64,8 @@ def predict_test(run_dir, root, gpus):
                      'data': {NONCLICK_SAMPLING_KEY: sampling},
                      'evaluation': {'is_logged_ctcvr': False},
                      'training': {**cfg['training'], 'gpus': gpus}}
-    ids, y, z, scores = Trainer(inference_cfg, str(root))._predict_numpy(model, split, split_name='test')
+    ids, y, z, scores = Trainer(inference_cfg, str(root))._predict_numpy(
+        model, split, split_name='test', is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space['test'])
     return pd.DataFrame({'sample_id': ids, 'y': y.astype('int8'), 'z': z.astype('int8'),
                          **{k: v.astype('float32') for k, v in scores.items()}})
 

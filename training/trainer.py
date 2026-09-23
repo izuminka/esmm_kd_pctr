@@ -21,6 +21,7 @@ import pandas as pd
 import torch
 
 from data.vocab import encode_batch
+from training import downsampling
 from training.downsampling import NONCLICK_SAMPLING_KEY
 
 logger = logging.getLogger(__name__)
@@ -345,7 +346,8 @@ class Trainer:
                     logger.info("  %s: not loaded, skipping", split_name)
                     continue
                 t0 = time.perf_counter()
-                ids, ys, zs, scores = self._predict_numpy(model, split_data, split_name=split_name)
+                ids, ys, zs, scores = self._predict_numpy(model, split_data, split_name=split_name,
+                    is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[split_name])
                 path = write_split(self.out_dir, split_name, self.model_name,
                                    ids, ys, zs, scores, self.save_predictions)
                 logger.info("  %s: %d rows -> %s (%.1fs)", split_name, len(ids), path, time.perf_counter() - t0)
@@ -353,7 +355,9 @@ class Trainer:
             for split_name, imps in [("train", dataset.train), ("val", dataset.val), ("test", dataset.test)]:
                 t0 = time.perf_counter()
                 if self.model_name == "esmm":
-                    ids, ys, zs, qs, vs = self.predict_esmm(model, imps, dataset.vocabs, field_ids)
+                    ids, ys, zs, qs, vs = self.predict_esmm(
+                        model, imps, dataset.vocabs, field_ids,
+                        is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[split_name])
                     scores = {"q": qs, "v": vs}
                 else:
                     ids, ys, zs, score = self.predict(model, imps, dataset.vocabs, field_ids)
@@ -397,9 +401,9 @@ class Trainer:
                 scores.extend(torch.sigmoid(logit).cpu().tolist())
         return ids, ys, zs, scores
 
-    def predict_esmm(self, model, impressions: list, vocabs: dict, field_ids: list) -> tuple:
-        """Return (sample_ids, ys, zs, q_scores, v_scores) as plain Python lists."""
-        from training.downsampling import recover_ctr
+    def predict_esmm(self, model, impressions: list, vocabs: dict, field_ids: list,
+                     *, is_ctr_downsampled_space: bool = False) -> tuple:
+        """Return Python-list scores in the explicitly requested population space."""
         model.eval()
         device = self.device
         ids, ys, zs, q_scores, v_scores = [], [], [], [], []
@@ -411,8 +415,8 @@ class Trainer:
                 ids.extend(imp.sample_id for imp in batch)
                 ys.extend(imp.y for imp in batch)
                 zs.extend(imp.z for imp in batch)
-                if self.nonclick_rate < 1.0:
-                    q = recover_ctr(q, self.nonclick_rate)
+                q = downsampling.model_ctr_for_space(
+                    q, self.nonclick_rate, is_ctr_downsampled_space=is_ctr_downsampled_space)
                 q_scores.extend(q.cpu().tolist())
                 v_scores.extend(v.cpu().tolist())
         return ids, ys, zs, q_scores, v_scores
@@ -488,7 +492,9 @@ class Trainer:
         enc, y, z = split_data.get_batch(batch_idx)
         if self.model_name == "esmm_logged_pctr":
             q, v = model(enc)
-            loss = model.loss(q, v, y, z, split_data.logged_pctr[batch_idx])
+            loss = model.loss(
+                q, v, y, z, split_data.logged_pctr[batch_idx],
+                is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space["train"])
         elif self.model_name == "esmm":
             from models.esmm import esmm_loss
             q, v = model(enc)
@@ -510,20 +516,20 @@ class Trainer:
         idx,         # row indices of this batch within that split
         enc,         # those rows' encoded features
         split_name: str,
+        *, is_ctr_downsampled_space: bool = False,
     ) -> dict:
         """Named prediction columns for one encoded batch of rows `idx`.
 
         A single-head model reports one score; ESMM reports its two heads
         separately, leaving any product to the consumer, so that a head can be
         scored on its own population as well as inside a product. An ESMM with no
-        auxiliary CTR head has no q. Logged pCTR is included only for test
+        auxiliary CTR head has no q. is_ctr_downsampled_space preserves raw CTR when true; split_name only controls logged-score reporting. Logged pCTR is included only for test
         reporting and logged-model validation, never for train reports.
         """
         if self.is_esmm:
             q, v = model(enc)
-            if q is not None and self.nonclick_rate < 1.0:
-                from training.downsampling import recover_ctr
-                q = recover_ctr(q, self.nonclick_rate)
+            q = downsampling.model_ctr_for_space(
+                q, self.nonclick_rate, is_ctr_downsampled_space=is_ctr_downsampled_space)
             scores = {"v": v} if q is None else {"q": q, "v": v}
             if split_name in self.logged_ctcvr_splits:
                 scores["p"] = split_data.logged_pctr[idx]
@@ -560,10 +566,12 @@ class Trainer:
             return column("p") * column("v"), y * z
         raise ValueError(f"Unknown checkpoint_metric: {self.checkpoint_metric!r}")
 
-    def _predict_numpy(self, model, split_data, *, split_name: str) -> tuple:
+    def _predict_numpy(self, model, split_data, *, split_name: str,
+                       is_ctr_downsampled_space: bool = False) -> tuple:
         """Return (sample_ids, ys, zs, scores) from a SplitData, as numpy arrays.
 
         `scores` is the column -> array mapping `save_scores` writes out.
+        is_ctr_downsampled_space selects raw versus recovered CTR independently of split_name.
         """
         model.eval()
         ids_out, ys_out, zs_out = [], [], []
@@ -577,7 +585,8 @@ class Trainer:
                 ids_out.append(split_data.sample_ids[idx].cpu())
                 ys_out.append(y.cpu())
                 zs_out.append(z.cpu())
-                for column, score in self._batch_scores(model, split_data, idx, enc, split_name).items():
+                for column, score in self._batch_scores(model, split_data, idx, enc, split_name,
+                                                          is_ctr_downsampled_space=is_ctr_downsampled_space).items():
                     scores_out.setdefault(column, []).append(score.cpu())
         return (
             torch.cat(ids_out).numpy(),
@@ -598,7 +607,8 @@ class Trainer:
                 idx = torch.arange(start, min(start + eval_batch, n),
                                    device=val_split.device)
                 enc, y, z = val_split.get_batch(idx)
-                for column, score in self._batch_scores(model, val_split, idx, enc, "val").items():
+                for column, score in self._batch_scores(model, val_split, idx, enc, "val",
+                                                          is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space["val"]).items():
                     columns.setdefault(column, []).append(score.cpu())
                 ys.append(y.cpu())
                 zs.append(z.cpu())

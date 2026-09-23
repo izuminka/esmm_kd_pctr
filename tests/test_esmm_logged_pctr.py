@@ -246,3 +246,23 @@ def test_kd_tau_build_uses_single_sampling_config():
     cfg['model_params']['nonclick_rate'] = .5
     with pytest.raises(ValueError, match='configure retention only'):
         build_model(cfg, {'f1':5})
+
+
+@pytest.mark.parametrize("is_ctr_downsampled_space", [True, False])
+def test_kd_tau_aligns_teacher_to_requested_ctr_space(is_ctr_downsampled_space, monkeypatch):
+    from training import downsampling as module
+    from training.downsampling import is_ctr_downsampled_space as spaces
+    assert spaces["train"] is True and spaces["val"] is False and spaces["test"] is False
+    model = LoggedPctrESMM(**TINY, objective="kd_tau", alpha=.5, aux_weight=1., nonclick_rate=.25)
+    if not is_ctr_downsampled_space:
+        def forbidden(*args):
+            raise AssertionError("full-space teacher must remain unchanged")
+        monkeypatch.setattr(module, "retained_ctr", forbidden)
+    q, p = Q.clone(), P.clone()
+    loss = model.loss(q, V, Y, Z, p, is_ctr_downsampled_space=is_ctr_downsampled_space)
+    expected = np.mean([
+        .5*bce(y, qi) + .5*bce(pi/(pi+.25*(1-pi)) if is_ctr_downsampled_space else pi, qi)
+        + bce(y*z, qi*vi)
+        for y,z,qi,vi,pi in zip(Y.tolist(),Z.tolist(),Q.tolist(),V.tolist(),P.tolist())])
+    assert loss.item() == pytest.approx(expected, rel=1e-6)
+    assert torch.equal(q, Q) and torch.equal(p, P)

@@ -184,7 +184,10 @@ def main():
             runs.update_run(run_dir, **{downsampling.NONCLICK_SAMPLING_KEY: {
                 **sampling, **counts, "original_rows": original_rows,
                 "sample_ids_file": "retained_sample_ids.npy",
-                "reported_ctr": "full_population_posterior",
+                "reported_ctr": {
+                    split: "retained_population" if is_downsampled else "full_population_posterior"
+                    for split, is_downsampled in downsampling.is_ctr_downsampled_space.items()
+                },
             }})
             logger.info("Nonclick retention %s: %d/%d train rows, %d clicks, %d conversions",
                         sampling["rate"], len(dataset.train), original_rows,

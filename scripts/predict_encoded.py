@@ -114,7 +114,8 @@ def main():
             run_cfg = yaml.safe_load(f)
     else:
         run_cfg = cfg
-    params = (ckpt["model_params"] if ckpt["model_type"] == "cnn_attention"
+    params = (ckpt["model_params"] if (ckpt["model_type"] == "cnn_attention"
+              or ckpt.get("model_params", {}).get("objective") == "kd_tau")
               else run_cfg.get("model_params", {}))
     model = build_model(ckpt["model_type"], ckpt["vocab_sizes"], params).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -146,7 +147,9 @@ def main():
     trainer_cfg = {**cfg, "model": ckpt["model_type"], "model_params": run_cfg.get("model_params", {}),
                    "data": {downsampling.NONCLICK_SAMPLING_KEY: sampling},
                    "evaluation": {"is_logged_ctcvr": is_logged_ctcvr}}
-    ids, ys, zs, scores = Trainer(trainer_cfg, _ROOT_DIR)._predict_numpy(model, split, split_name=args.split)
+    ids, ys, zs, scores = Trainer(trainer_cfg, _ROOT_DIR)._predict_numpy(
+        model, split, split_name=args.split,
+        is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[args.split])
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         save_scores(ids, ys, zs, scores, args.out)

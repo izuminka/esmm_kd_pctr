@@ -527,3 +527,51 @@ def test_full_retention_bypasses_recovery(monkeypatch):
     default = evaluate_esmm(model, encoded, y, z, is_logged_ctcvr=False)
     explicit = evaluate_esmm(model, encoded, y, z, is_logged_ctcvr=False, nonclick_rate=1.0)
     assert explicit == default
+
+
+@pytest.mark.parametrize('rate', [.5, .05, 1e-45])
+def test_tau_endpoints_dtype_and_inverse(rate):
+    from training.downsampling import retained_ctr, recover_ctr
+    p = torch.tensor([0., .01, .2, 1.], dtype=torch.float64)
+    transformed = retained_ctr(p, rate)
+    assert transformed[0] == 0 and transformed[-1] == 1
+    assert torch.isfinite(transformed).all()
+    if rate >= .05:
+        assert torch.allclose(recover_ctr(transformed,rate),p)
+    low_precision = retained_ctr(p.float(), rate)
+    assert low_precision.dtype == torch.float32
+    assert torch.isfinite(low_precision).all()
+
+
+
+@pytest.mark.parametrize("rate", [1, 1.0])
+def test_retained_ctr_identity(rate):
+    p = torch.tensor([0., .2, 1.])
+    assert downsampling.retained_ctr(p, rate) is p
+
+
+@pytest.mark.parametrize("rate", [.5, .25, .1, .05])
+def test_retained_ctr_matches_population_counts(rate):
+    clicks = torch.tensor([0., 1., 20., 100.], dtype=torch.float64)
+    nonclicks = 100 - clicks
+    p = clicks / 100
+    original = p.clone()
+    expected = clicks / (clicks + rate * nonclicks)
+    torch.testing.assert_close(downsampling.retained_ctr(p, rate), expected)
+    assert torch.equal(p, original)
+
+
+@pytest.mark.parametrize("rate", [0, -1, 1.1, float("nan"), float("inf"), True, "0.5"])
+def test_retained_ctr_rejects_invalid_rates(rate):
+    with pytest.raises(ValueError, match="retention rate"):
+        downsampling.retained_ctr(torch.tensor([.2]), rate)
+
+
+def test_tau_sampling_config():
+    cfg = {"model": "esmm_logged_pctr", "model_params": {"objective": "kd_tau"},
+           "data": {"nonclick_sampling": {"rate": .25, "seed": 2026}}}
+    assert downsampling.from_config(cfg) == {"rate": .25, "seed": 2026}
+    for objective in ("kd", "product"):
+        cfg["model_params"]["objective"] = objective
+        with pytest.raises(ValueError, match="kd_tau"):
+            downsampling.from_config(cfg)

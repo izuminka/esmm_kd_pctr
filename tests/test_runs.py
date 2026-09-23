@@ -6,6 +6,8 @@ finish, once to fail -- and checks the pointers move only for the run that
 finished.
 """
 
+from metric_reports import canonical_rows, metric_report
+
 import csv
 import json
 import multiprocessing as mp
@@ -290,7 +292,7 @@ def test_train_py_records_a_finished_run_and_a_failed_one(encoded, tmp_path):
     assert ok.returncode == 0, ok.stderr[-3000:]
 
     run_dir = runs.resolve_run(str(artifacts), "dcn")
-    for name in ("config.yaml", "run.json", "history.csv", "best.pt", "metrics.json",
+    for name in ("config.yaml", "run.json", "history.csv", "best.pt", "metrics/test.json",
                  "predictions/train.parquet", "predictions/val.parquet",
                  "predictions/test.parquet"):
         assert os.path.exists(os.path.join(run_dir, name)), name
@@ -357,7 +359,7 @@ def test_validation_only_run_does_not_load_or_report_test(encoded, tmp_path):
         [sys.executable, os.path.join(CODE_DIR, "scripts", "report_metrics.py"),
          "--run-dir", run_dir], capture_output=True, text=True, timeout=60)
     assert report.returncode == 0, report.stderr
-    with open(os.path.join(run_dir, "metrics.json")) as f:
+    with metric_report(run_dir) as f:
         assert {row["split"] for row in json.load(f)} == {"train", "val"}
 
 

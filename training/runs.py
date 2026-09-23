@@ -13,7 +13,7 @@ the model directory (configs/<name>/train.yaml), or a legacy flat config stem:
         best.pt               the checkpoint kept by validation
         predictions/<split>.parquet   with training.save_predictions
         metrics/<split>.json          without it: the split scored in memory
-        metrics.json
+        metrics/<split>.json
 
 A run id is the UTC start time in ISO 8601 basic format, so ids sort in start
 order and mean the same on every machine.
@@ -214,9 +214,9 @@ def selection(run_dir: str, metric: str) -> dict:
 
 
 def read_test_metrics(run_dir: str) -> dict:
-    """Test-split rows of metrics.json, keyed by evaluation population."""
-    with open(os.path.join(run_dir, "metrics.json")) as f:
-        rows = json.load(f)
+    """Read test metrics from canonical reports (or a legacy aggregate)."""
+    from evaluation.reports import read_metric_rows
+    rows = read_metric_rows(run_dir)
     return {r["population"]: {k: r[k] for k in ("auc", "pr_auc", "ne", "ce")}
             for r in rows if r["split"] == "test"}
 

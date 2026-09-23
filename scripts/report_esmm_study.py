@@ -8,6 +8,9 @@ import statistics
 from pathlib import Path
 
 import yaml
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from evaluation.reports import study_test_metrics
 
 
 def report(study: Path, root: Path) -> Path:
@@ -38,8 +41,7 @@ def report(study: Path, root: Path) -> Path:
             best = select(history, key=lambda row: float(row["val_score"]))
             if run["selected_on"]["epoch"] != int(best["epoch"]):
                 raise ValueError(f"{arm}: checkpoint does not optimize the validation selection metric")
-        metrics = {r["population"]: r for r in json.loads((run_dir / "metrics.json").read_text())
-                   if r["split"] == "test"}
+        metrics = study_test_metrics(run_dir)
         for key, label in populations.items():
             if key == "CTCVR-logged" and key not in metrics:
                 continue  # Native-only training has no logged evaluation yet.
@@ -109,7 +111,7 @@ def report_seed_summary(study, root, manifest, registry):
             assert run["selected_on"]["metric"] == manifest["checkpoint_metric"]
             assert run["selected_on"]["split"] == "val"
             assert run["selected_on"]["epoch"] == int(min(history, key=lambda r: float(r["val_score"]))["epoch"])
-            metrics = json.loads((run_dir / "metrics/test.json").read_text())
+            metrics = list(study_test_metrics(run_dir).values())
             assert {r["population"] for r in metrics} == {"CTR", "pCVR", "CTCVR", "CTCVR-logged"}
             sources.append({"variant": base, "seed": seed, "run_dir": str(run_dir), "selected_on": run["selected_on"]})
             for row in metrics:

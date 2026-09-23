@@ -6,6 +6,8 @@ ESMM controls selected on the native CTCVR product. Each run must train, record
 exactly which DCN files it used, and report CTCVR on the logged product.
 """
 
+from metric_reports import canonical_rows, metric_report
+
 import csv
 import json
 import os
@@ -129,7 +131,7 @@ def test_each_run_finishes_in_its_config_named_folder(logged_runs, name):
 @pytest.mark.parametrize("name", ESMM_RUNS)
 def test_every_esmm_run_reports_ctcvr_on_the_logged_product(logged_runs, name):
     run_dir = logged_runs["runs"][name]
-    with open(os.path.join(run_dir, "metrics.json")) as f:
+    with metric_report(run_dir) as f:
         rows = json.load(f)
     expected = (["CTCVR-logged", "pCVR"] if name == "esmm_logged_pctr_product"
                 else ["CTR", "CTCVR", "CTCVR-logged", "pCVR"])
@@ -161,7 +163,7 @@ def test_every_output_names_the_dcn_files_used(logged_runs, name):
     else:
         assert "logged_pctr" not in ckpt  # test scores are loaded after checkpoint selection
 
-    with open(os.path.join(run_dir, "metrics.json")) as f:
+    with metric_report(run_dir) as f:
         logged = [r for r in json.load(f) if r["population"] == "CTCVR-logged"]
     assert {r["split"]: r["logged_pctr_file"] for r in logged} == {s: block["predictions"][s] for s in used - {"train"}}
     assert all(r["logged_pctr_run"] == block["dcn_run"] for r in logged)
@@ -175,7 +177,7 @@ def test_history_tracks_the_prescribed_validation_metrics(logged_runs, name):
     with open(os.path.join(logged_runs["runs"][name], "history.csv"), newline="") as f:
         (row,) = list(csv.DictReader(f))
     assert any("logged" in c for c in row) == (logged_runs["arms"][name][0] == "esmm_logged_pctr")
-    with open(os.path.join(logged_runs["runs"][name], "metrics.json")) as f:
+    with metric_report(logged_runs["runs"][name]) as f:
         pcvr = next(r for r in json.load(f) if r["split"] == "val" and r["population"] == "pCVR")
     for metric, column in (("auc", "auc"), ("pr_auc", "prauc"), ("ne", "ne"), ("ce", "ce")):
         # This small real-data fixture has no validation conversions; AUC is undefined.
@@ -216,7 +218,7 @@ def test_plain_esmm_with_logged_ctcvr_off_reports_no_logged_product(logged_runs)
     run_dir = logged_runs["runs"]["esmm_no_logged"]
     run = runs.read_run(run_dir)
     assert run["status"] == runs.FINISHED and "logged_pctr" not in run
-    with open(os.path.join(run_dir, "metrics.json")) as f:
+    with metric_report(run_dir) as f:
         rows = json.load(f)
     for split in SPLITS:
         assert [r["population"] for r in rows if r["split"] == split] == ["CTR", "CTCVR", "pCVR"]
@@ -303,7 +305,7 @@ def test_report_metrics_resolves_a_run_by_config_name(logged_runs, name):
 
     assert done.returncode == 0, done.stderr[-3000:]
     assert f"artifacts/{name}" in done.stdout or name in done.stdout
-    with open(os.path.join(logged_runs["runs"][name], "metrics.json")) as f:
+    with metric_report(logged_runs["runs"][name]) as f:
         populations = {r["population"] for r in json.load(f)}
     assert ("CTCVR-logged" in populations) == (name != "esmm_no_logged")
 

@@ -1,5 +1,7 @@
 """Independent logged-score evaluations share one immutable model prediction cache."""
 
+from metric_reports import canonical_rows, metric_report
+
 import json
 from pathlib import Path
 import subprocess
@@ -43,7 +45,7 @@ def cached_run(tmp_path, monkeypatch):
     monkeypatch.setattr(predictions, 'predict_test', predict)
     native = [{'split': 'test', 'population': 'pCVR', 'rows': 2, 'positives': 1,
                **compute_metrics(np.array([.8, .4]), np.array([1, 0]))}]
-    for path in (run / 'metrics/test.json', run / 'metrics.json'):
+    for path in (run / 'metrics/test.json',):
         path.write_text(json.dumps(native))
     return run, frame, calls
 
@@ -75,8 +77,10 @@ def test_many_sources_reuse_inference_and_preserve_native_results(tmp_path, cach
     done = subprocess.run([sys.executable, str(CODE / 'scripts/report_metrics.py'),
                            '--run-dir', str(run), '--include-logged'], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
-    assert len(json.loads((run / 'metrics_combined.json').read_text())) == 3
-    assert (run / 'metrics.json').read_bytes() == original['metrics.json']
+    assert done.stdout.count('CTCVR-logged') >= 2
+    assert len(canonical_rows(run, include_logged=True)) == 3
+    assert not (run / 'metrics_combined.json').exists()
+    assert not (run / 'metrics.json').exists()
 
 
 @pytest.mark.parametrize('change', ['checkpoint', 'inputs', 'cache'])
@@ -292,7 +296,7 @@ def test_training_to_multiple_logged_evaluations_end_to_end(encoded, tmp_path):
     cli('train.py', '--config', config, '--best-models', tmp_path / 'best.yaml')
     checkpoint, = (tmp_path / 'runs/smoke').glob('*/best.pt')
     run = checkpoint.parent
-    assert {r['split'] for r in json.loads((run / 'metrics.json').read_text())} == {'train', 'val'}
+    assert {r['split'] for r in canonical_rows(run)} == {'train', 'val'}
     assert not (run / 'predictions/test.parquet').exists()
     assert not (run / 'metrics/test.json').exists()
     history = list(csv.DictReader((run / 'history.csv').open()))
@@ -330,5 +334,11 @@ def test_training_to_multiple_logged_evaluations_end_to_end(encoded, tmp_path):
     assert export.stat().st_mtime_ns == mtime
     assert predictions.digest(checkpoint) == before
     assert (run / 'metrics/test.json').read_bytes() == native
-    combined = json.loads((run / 'metrics_combined.json').read_text())
+    combined = canonical_rows(run, include_logged=True)
     assert {r.get('pctr_model') for r in combined if r['population'] == 'CTCVR-logged'} == {'first', 'second'}
+
+
+def test_evaluation_reports_do_not_create_aggregate_files(tmp_path, cached_run):
+    run, _, _ = cached_run
+    logged.evaluate_logged(run, source_config(tmp_path), tmp_path)
+    assert all(not (run / name).exists() for name in ('metrics.json', 'metrics_combined.json', 'metrics_migration.json'))

@@ -4,6 +4,9 @@ import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from evaluation.reports import study_test_metrics
 
 
 def main():
@@ -25,7 +28,7 @@ def main():
         if dcn_source is not None and source != dcn_source:
             raise RuntimeError('arms have different logged pCTR sources')
         dcn_source = source
-        metrics = json.loads((folder / 'metrics.json').read_text())
+        metrics = list(study_test_metrics(folder).values())
         assert {r['population'] for r in metrics} == {'CTR', 'pCVR', 'CTCVR', 'CTCVR-logged'}
         assert all(r['split'] == 'test' for r in metrics)
         train_rows = run.get('train_cohort', {}).get('n_rows', run['data']['train']['n_rows'])

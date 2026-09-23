@@ -7,8 +7,7 @@ Usage:
 For each of train, val and test, scores <run>/predictions/<split>.parquet, or,
 for a model configured not to export predictions, reads the rows already scored
 in memory from <run>/metrics/<split>.json. Reads the latest run of the config
-named by --name unless --run-dir names a run, and writes the table to
-<run>/metrics.json. Computes AUC, PR-AUC, NE and CE per population, matching
+named by --name unless --run-dir names a run, and prints the table without writing an aggregate report. Computes AUC, PR-AUC, NE and CE per population, matching
 the evaluation recipe in
 paper/frozen_pctr_iclr2027.tex. Metrics are computed over the complete
 population before rounding, so the test row is directly comparable to the
@@ -18,6 +17,7 @@ paper's reported values, which are printed alongside for reference.
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 
 import numpy as np
@@ -123,8 +123,11 @@ def _attach_logged_pctr_source(rows: list[dict], logged_pctr: dict | None) -> No
         source = (logged_pctr or {}).get("files", {}).get(r["split"])
         if source is None:
             raise SystemExit(f"{r['split']} CTCVR-logged has no logged_pctr source in run.json")
-        r["logged_pctr_run"] = logged_pctr["dcn_run"]
-        r["logged_pctr_file"] = source["file"]
+        expected = {"logged_pctr_run": logged_pctr["dcn_run"], "logged_pctr_file": source["file"]}
+        for key, value in expected.items():
+            if key in r and r[key] != value:
+                raise ValueError(f"{r['split']}: logged producer disagrees with run metadata")
+            r[key] = value
 
 
 def main():
@@ -137,17 +140,21 @@ def main():
                     help="config name whose latest run to read, e.g. esmm_logged_pctr_kd05")
     ap.add_argument("--run-dir", default=None, help="defaults to the latest run of --name")
     ap.add_argument("--include-logged", action="store_true",
-                    help="include metrics_logged/<pctr_model> and write metrics_combined.json")
+                    help="display metrics_logged/<pctr_model> alongside native metrics")
     args = ap.parse_args()
     if not (args.run_dir or args.name):
         ap.error("pass --run-dir, or --name to take that config's latest run")
     # Runs live under their config's name, which need not be the model's: several
     # configs (cohorts, loss variants) share one model class.
     run_dir = args.run_dir or resolve_run(args.artifacts, args.name)
+    print(f"Run: {run_dir}")
     model = args.model or read_run(run_dir)["model"]
     with open(os.path.join(run_dir, "config.yaml")) as f:
         report_cfg = yaml.safe_load(f)
     logged_splits = logged_ctcvr_splits(report_cfg)
+    separated_logged = any(Path(run_dir, "metrics_logged").glob("*/test.json"))
+    if separated_logged:
+        logged_splits = logged_splits - {"test"}
 
     rows = []
     # A separate evaluator explicitly binds test predictions to this run.
@@ -159,16 +166,28 @@ def main():
     for split in report_splits:
         parquet = os.path.join(run_dir, "predictions", f"{split}.parquet")
         scored = os.path.join(run_dir, "metrics", f"{split}.json")
-        if os.path.exists(parquet):
+        if os.path.exists(scored):
+            with open(scored) as f:
+                stored_rows = json.load(f)
+            before = json.dumps(stored_rows)
+            split_rows = [r for r in stored_rows
+                          if split in logged_splits or r["population"] != "CTCVR-logged"]
+            _attach_logged_pctr_source(split_rows, read_run(run_dir).get("logged_pctr"))
+            if json.dumps(stored_rows) != before:
+                with open(scored, "w") as f:
+                    json.dump(stored_rows, f, indent=2)
+            rows += split_rows
+        elif os.path.exists(parquet):
             df = pd.read_parquet(parquet)
             scores = {c: df[c].to_numpy() for c in df.columns if c not in _LABEL_COLUMNS}
             if split not in logged_splits:
                 scores.pop("p", None)
-            rows += metric_rows(split, model, df["y"].to_numpy(), df["z"].to_numpy(), scores)
-        elif os.path.exists(scored):
-            with open(scored) as f:
-                rows += [r for r in json.load(f)
-                         if split in logged_splits or r["population"] != "CTCVR-logged"]
+            split_rows = metric_rows(split, model, df["y"].to_numpy(), df["z"].to_numpy(), scores)
+            _attach_logged_pctr_source(split_rows, read_run(run_dir).get("logged_pctr"))
+            os.makedirs(os.path.dirname(scored), exist_ok=True)
+            with open(scored, "w") as f:
+                json.dump(split_rows, f, indent=2)
+            rows += split_rows
         else:
             print(f"  (no predictions or metrics for {split}, skipping)")
 
@@ -212,10 +231,6 @@ def main():
         if test:
             print(f"Test CTR AUC delta: {test['auc'] - _PAPER_CNN_ATTENTION_CTR_AUC:+.6f}")
 
-    out = os.path.join(run_dir, "metrics_combined.json" if args.include_logged else "metrics.json")
-    with open(out, "w") as f:
-        json.dump(rows, f, indent=2)
-    print(f"\nwrote {out}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 """CNN + attention through the existing encoded training/prediction/report CLIs."""
 
+from metric_reports import canonical_rows, metric_report
+
 import json
 import os
 from pathlib import Path
@@ -207,7 +209,7 @@ def test_real_data_training_checkpoint_reload_and_reporting(encoded, tmp_path, s
     restored_ne, _ = trainer._val_score_numpy(model, dataset.val)
     assert restored_ne == pytest.approx(history.val_ctr_ne.min())
 
-    rows = json.loads((run_dir / "metrics.json").read_text())
+    rows = canonical_rows(run_dir)
     for split in ("train", "val", "test"):
         subset = [r for r in rows if r["split"] == split]
         assert [r["population"] for r in subset] == ["CTR", "CTCVR"]

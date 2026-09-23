@@ -55,16 +55,14 @@ logged pCTR or pCVR; the downsampling correction belongs only to native pCTR.
 ├── best.pt
 ├── config.yaml                         # Original training snapshot
 ├── metrics/                            # Original native metrics
-├── metrics.json                        # Original aggregate report
 ├── predictions/
 │   ├── test.parquet                     # sample_id, y, z, native score columns
 │   └── test.provenance.json             # Checkpoint/input identity and file hash
-├── metrics_logged/
-│   └── <pctr_model>/
-│       ├── config.yaml
-│       ├── provenance.json
-│       └── test.json
-└── metrics_combined.json               # Explicit combined report
+└── metrics_logged/
+    └── <pctr_model>/
+        ├── config.yaml
+        ├── provenance.json
+        └── test.json
 ```
 
 The cache binds predictions to checkpoint/config hashes and encoded test/common
@@ -90,8 +88,11 @@ code/.venv/bin/python code/scripts/report_metrics.py \
   --include-logged
 ```
 
-The command labels each external source and writes `metrics_combined.json`.
-Without `--include-logged`, reporting retains the existing native-report path.
+The command labels each external source and prints the combined table in memory.
+`metrics/<split>.json` and `metrics_logged/<pctr_model>/test.json` are the
+canonical reports; no aggregate or migration marker is written into run folders.
+If a split report is missing, reporting can compute it from that split’s saved
+predictions and save it under `metrics/`. Existing split reports take precedence.
 
 ## Score populations and selection
 
@@ -114,3 +115,11 @@ comparisons across different selection metrics.
 
 Existing saved configs with logged evaluation enabled retain their historical
 behavior. The separate evaluator adds new results without changing that history.
+
+
+## Historical artifact maintenance
+
+One-off migration and cleanup code, tests, and instructions live in the
+project's top-level `migration/` directory. Production reporting requires no
+migration marker or helper. Historical training snapshots and logged-result
+provenance are retained; no metric recomputation is needed to read them.

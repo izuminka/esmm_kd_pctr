@@ -98,3 +98,41 @@ def test_report_checks_selection_direction_and_retains_first_tie(study, metric):
     run_path.write_text(json.dumps(run))
     with pytest.raises(ValueError, match='does not optimize'):
         report(study_dir, root)
+
+
+def test_seed_summary_reads_canonical_native_and_logged_reports(tmp_path):
+    import hashlib
+    from scripts.report_esmm_study import report_seed_summary
+    study_dir = tmp_path / 'study'
+    study_dir.mkdir()
+    manifest = {'seed_groups': {'esmm': None}, 'checkpoint_metric': 'ctcvr_ne', 'jobs': []}
+    registry = {}
+    for seed in range(42, 46):
+        arm = f'esmm_seed{seed}'
+        run = tmp_path / 'artifacts' / arm / 'r1'
+        (run / 'metrics').mkdir(parents=True)
+        cfg = {'model': 'esmm', 'training': {'seed': seed, 'out_dir': 'artifacts'}}
+        config = run / 'config.yaml'
+        config.write_text(yaml.safe_dump(cfg))
+        (run / 'run.json').write_text(json.dumps({'status': 'FINISHED', 'selected_on': {
+            'metric': 'ctcvr_ne', 'split': 'val', 'epoch': 2}}))
+        (run / 'history.csv').write_text('epoch,val_score\n1,1.2\n2,.8\n3,.9\n4,1.0\n5,1.1\n')
+        (run / 'best.pt').write_bytes(b'checkpoint')
+        rows = [{'split': 'test', 'population': pop, 'rows': 10, 'positives': 2,
+                 'auc': seed / 100, 'pr_auc': .1, 'ne': 1., 'ce': 1.}
+                for pop in ('CTR', 'pCVR', 'CTCVR', 'CTCVR-logged')]
+        (run / 'metrics/test.json').write_text(json.dumps(rows[:3]))
+        logged = run / 'metrics_logged/teacher'
+        logged.mkdir(parents=True)
+        (logged / 'test.json').write_text(json.dumps([dict(rows[3], pctr_model='teacher')]))
+        (logged / 'provenance.json').write_text(json.dumps({
+            'checkpoint_sha256': hashlib.sha256(b'checkpoint').hexdigest()}))
+        manifest['jobs'].append({'arm': arm, 'config': str(config)})
+        registry[arm] = {'run': 'r1'}
+    report_seed_summary(study_dir, tmp_path, manifest, registry)
+    summary = json.loads((study_dir / 'seed_summary.json').read_text())['summary']
+    assert len(summary) == 16
+    row = next(r for r in summary if r['population'] == 'CTCVR-logged' and r['metric'] == 'auc')
+    assert row['values'] == [.42, .43, .44, .45]
+    assert row['mean'] == pytest.approx(.435)
+    assert not list((tmp_path / 'artifacts').rglob('metrics.json'))

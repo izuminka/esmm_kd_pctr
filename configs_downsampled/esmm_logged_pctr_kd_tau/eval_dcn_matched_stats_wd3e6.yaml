@@ -1,0 +1,6 @@
+pctr_model: dcn_matched_stats_wd3e6
+logged_pctr:
+  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z
+  predictions:
+    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
+  score_column: score

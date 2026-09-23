@@ -353,3 +353,27 @@ def test_tau_checkpoint_and_retained_teacher_alignment(logged_runs):
     saved_val = pd.read_parquet(run/'predictions/val.parquet')
     teacher = pd.read_parquet(logged_runs['logged_pctr']['predictions']['val']).set_index('sample_id')
     assert np.array_equal(saved_val.p.to_numpy(), teacher.loc[saved_val.sample_id, 'score'].to_numpy())
+
+
+def test_tau_separate_logged_evaluation_pipeline(logged_runs):
+    from pathlib import Path
+    from evaluation.predictions import evaluate_native
+    from evaluation.logged_ctcvr import evaluate_logged
+    run = Path(logged_runs['runs']['esmm_logged_pctr_kd_tau'])
+    root = Path(CODE_DIR).parent
+    predictions = evaluate_native(run, root, gpus=0, refresh=True)
+    saved = pd.read_parquet(run/'predictions/test.parquet')
+    assert 'p' not in saved.columns  # native inference needs no external score
+    recipe = Path(logged_runs['tmp'])/'eval_tau_teacher.yaml'
+    recipe.write_text(yaml.safe_dump({'pctr_model':'fixture_dcn', 'logged_pctr':{
+        **logged_runs['logged_pctr'], 'predictions':{'test':logged_runs['logged_pctr']['predictions']['test']}}}))
+    path = evaluate_logged(run, recipe, root, predictions=predictions)
+    row, = json.loads(path.read_text())
+    teacher = pd.read_parquet(logged_runs['logged_pctr']['predictions']['test']).set_index('sample_id')
+    scores = teacher.loc[saved.sample_id, 'score'].to_numpy()*saved.v.to_numpy()
+    import numpy as np
+    positives = (saved.y.to_numpy()*saved.z.to_numpy()).sum()
+    if positives:
+        assert row['ce'] == pytest.approx(scores.sum()/positives)
+    assert row['rows'] == len(saved)
+    assert row['pctr_model'] == 'fixture_dcn'

@@ -31,11 +31,11 @@ model_params:
   alpha: 0.7
   aux_weight: 1.0
 logged_pctr:
-  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z
+  dcn_run: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z
   predictions:
-    train: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/train.parquet
-    val: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/val.parquet
-    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
+    train: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/train.parquet
+    val: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/val.parquet
+    test: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/test.parquet
   score_column: score
 evaluation:
   is_logged_ctcvr: true

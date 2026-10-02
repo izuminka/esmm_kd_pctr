@@ -9,7 +9,7 @@ auction-clustered inference when those identifiers are available.
 Example, from the project root::
 
     code/.venv/bin/python code/scripts/compare_dcn_seeds.py \
-      --run-a artifacts/dcn_matched_stats_wd3e6/20260917T232959Z \
+      --run-a artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z \
       --run-b artifacts/dcn_matched_stats_wd3e6_seed43/20260929T214036Z
 """
 

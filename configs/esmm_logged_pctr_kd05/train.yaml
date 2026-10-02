@@ -37,11 +37,11 @@ model_params:
 # Frozen DCN-V2 pCTR p: detached and never a model input. It enters the loss as
 # described above and is reported as CTCVR-logged (p * v).
 logged_pctr:
-  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z  # frozen validation-NE winner
+  dcn_run: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z  # frozen validation-NE winner
   predictions:  # only required splits; joined by sample_id
-    train: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/train.parquet
-    val: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/val.parquet
-    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
+    train: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/train.parquet
+    val: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/val.parquet
+    test: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/test.parquet
   score_column: score
 
 evaluation:

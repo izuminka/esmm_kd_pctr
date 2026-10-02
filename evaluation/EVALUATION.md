@@ -1,7 +1,7 @@
 # Train once, evaluate many pCTR sources
 
 Active recipes live in `configs/<model>/train.yaml`: ESMM, the selected
-`dcn_matched_stats_wd3e6`, and full-data KD–0.3, KD–0.5, KD–0.7, and KD–teacher.
+`dcn_matched_stats_wd3e6_seed42`, and full-data KD–0.3, KD–0.5, KD–0.7, and KD–teacher.
 Exploratory and appendix recipes are preserved in `configs_old/<model>/`.
 Downsampled recipes use the same layout under `configs_downsampled/`.
 Run names come from the parent directory of `train.yaml`; existing flat
@@ -25,11 +25,11 @@ A new architecture still needs the usual model builder and prediction support.
 Each `eval_<pctr_model>.yaml` names one frozen producer:
 
 ```yaml
-pctr_model: dcn_matched_stats_wd3e6
+pctr_model: dcn_matched_stats_wd3e6_seed42
 logged_pctr:
-  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z
+  dcn_run: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z
   predictions:
-    test: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/test.parquet
+    test: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/test.parquet
   score_column: score
 ```
 

@@ -15,17 +15,24 @@ conversion tower, click-information transfer through attention, dense widths
 CNN architecture, optimizer recipe, initialization, dropout rate, or calibration
 weight. The implementation makes these choices explicit:
 
-| Component | Implementation |
+| Component | Robust architecture (version 2) |
 | --- | --- |
-| Shared input | Weighted-sum EmbeddingBag per field; fields sorted as in the existing pipeline |
-| CNN input | Concatenated embeddings shaped `[B, 1, F * 5]`; convolution over features, not a temporal user sequence |
-| Click tower | Conv1d channels 32/64/32, kernel 3, stride 1, padding 1, each with ReLU and dropout 0.2; flatten; dense 128/64/32 with ReLU and dropout 0.2 |
-| Conversion tower | Shared flattened input to dense 128/64/32 with ReLU and dropout 0.2 |
-| Transfer | Linear 32-to-32 projection of the click representation; stack with the conversion representation |
-| Attention | Linear query/key/value projections; each vector's Q·K divided by sqrt(32), softmax across the two vectors, weighted sum of V (equations 2–4) |
-| Heads | Independent linear-to-one click and direct conversion logits; sigmoid for reporting |
-| Initialization | Existing ESMM embedding rule U(-1/sqrt(K), 1/sqrt(K)), where K includes unknown ID 0; PyTorch defaults for dense and convolution layers |
+| Shared input | Weighted-mean EmbeddingBag per field; inactive/OOV bags use the trainable reserved ID-0 vector; append one presence bit per field |
+| Cold-start training | Replace field 101 by its missing state independently on 33.1509% of training rows |
+| CNN input | Concatenated embedding-plus-presence vectors shaped `[B, 1, F * 6]`; convolution over features, not a temporal sequence |
+| Click tower | Conv1d channels 32/64/32, kernel 3, stride 1, padding 1, each with ReLU and dropout 0.2; flatten; dense 128/64/32 |
+| Conversion tower | Shared flattened input to dense 128/64/32 |
+| Transfer | Linear 32-to-32 click projection stacked with the conversion representation; normalize each task vector |
+| Attention | Q/K cosine similarities bounded to [-1, 1], softmax across tasks, weighted sum of V; add a residual from the normalized conversion representation |
+| Heads | Independent linear-to-one click and direct impression-level conversion logits |
+| Initialization | ID 0 shares the normal embedding initialization and is trained by natural missing rows plus field masking |
 | Optimization | Adam, learning rate 0.001, no weight decay or gradient clipping, calibration alpha 1, seed 42 |
+
+Architecture version 1 preserves the original weighted-sum, all-zero missing
+state, unbounded dot-product attention, and no-residual tensor shapes. Prediction
+automatically assigns unversioned checkpoints to version 1, so prior runs remain
+reproducible. Version 2 is a robustness recipe motivated by measured failures;
+it is not claimed to be a verbatim implementation of unpublished paper details.
 
 The loss is the sum of mean click BCE and mean conversion BCE, computed with
 `binary_cross_entropy_with_logits`, plus
@@ -45,19 +52,25 @@ paper's stated 50/10/40 partition and removal of features occurring fewer than
 ten times, so this is an architecture implementation on our existing protocol,
 not an exact reproduction of the published experiment.
 
-`forward(batch)` returns two `[B]` logit tensors. Prediction files contain
-`sample_id, y, z, q, c`, where q is click probability and c is direct
+`forward(batch, forced_missing=None)` returns two `[B]` logit tensors.
+`forced_missing` is used only for deterministic robustness evaluation; ordinary
+prediction passes no override. Prediction files contain `sample_id, y, z, q, c`,
+where q is click probability and c is direct
 impression-level conversion probability. Report CTR on `(q, y)` and CTCVR on
 `(c, z)`, both over all impressions. The model has no conditional pCVR head;
 do not multiply c by q or logged pCTR and do not label c as pCVR.
 
-Run all five epochs, select the lowest complete-validation CTR normalized entropy
-(`ctr_ne`, ties keep the earlier checkpoint), and restore that checkpoint before
-final scoring. Test data never choose the epoch or rank runs. The history
-records validation AUC, PR-AUC, NE, and CE for both heads. The existing `ctr_auc`
-option remains available for earlier runs; it requires both validation click classes.
-Changing the default does not alter an active run's snapshotted selection metric
-or relabel existing AUC-selected checkpoints as NE-selected.
+Run all five epochs and select the lowest cold-start CTR normalized entropy
+(`cold_ctr_ne`, ties keep the earlier checkpoint). Each validation call creates a
+deterministic deployment-like mixture: 33.1509% of rows are scored with field 101
+forced through the learned missing state and the rest are scored normally. This
+rate is an input-coverage measurement, not a metric fitted on test labels.
+
+History records ordinary and cold-start CTR metrics plus mean click/conversion
+attention weights, attention entropy, and the minimum task weight. Bounded cosine
+scores cannot numerically underflow a task weight as the version-1 checkpoint did.
+Test labels never choose an epoch or rank runs. Ordinary `ctr_ne`, `ctr_auc`,
+and `ctr_prauc` selection remain available for controlled ablations.
 
 The test CTR metric row includes `reference_auc: 0.661` and
 `auc_delta: measured_auc - 0.661`; the report also prints them with the protocol
@@ -93,5 +106,6 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m pytest -q \
 
 The integration tests use the existing fixture carved from real Ali-CCP CSVs,
 the full default architecture, two short CPU epochs, and temporary artifacts and
-best-model registries. They cover both metrics-only and prediction-export modes,
-checkpoint restoration, independent test scoring, and complete-validation NE.
+best-model registries. They cover metrics-only and prediction-export modes, old
+and new checkpoint restoration, learned missing-state gradients, bounded
+attention, independent test scoring, and complete cold-start validation NE.

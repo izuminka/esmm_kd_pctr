@@ -59,6 +59,11 @@ def build_model(model_type: str, vocab_sizes: dict, params: dict):
         return LoggedPctrESMM(vocab_sizes, **params)
     if model_type == "cnn_attention":
         from models.cnn_attention import CNNAttention
+        # Checkpoints created before the robust architecture was versioned have
+        # the original tensor shapes and semantics. Restore them as version 1;
+        # new checkpoints persist architecture_version in model_params.
+        params = dict(params)
+        params.setdefault("architecture_version", 1)
         return CNNAttention(vocab_sizes, **params)
     raise ValueError(f"Unknown model_type: {model_type!r}")
 

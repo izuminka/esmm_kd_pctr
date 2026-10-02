@@ -15,6 +15,7 @@ import torch
 import yaml
 
 from evaluation.metrics import compute_metrics
+from models.cnn_attention import CNNAttention
 from scripts.predict_encoded import build_model as restore_model
 from scripts.report_metrics import logged_ctcvr_splits, metric_rows, populations
 from scripts.train import build_model
@@ -72,7 +73,7 @@ class _ValidationSplit:
 
 
 class _FixedModel(torch.nn.Module):
-    def forward(self, idx):
+    def forward(self, idx, forced_missing=None):
         q = torch.tensor([0.1, 0.2, 0.8, 0.9])[idx]
         c = torch.tensor([0.05, 0.1, 0.15, 0.2])[idx]
         return torch.logit(q), torch.logit(c)
@@ -80,6 +81,7 @@ class _FixedModel(torch.nn.Module):
 
 def test_selection_uses_full_validation_roc_auc_not_mean_batch_auc():
     cfg = _config()
+    cfg["training"].pop("cold_start_validation")
     cfg["training"].update(gpus=0, eval_batch_size=2, checkpoint_metric="ctr_auc")
     score, extras = Trainer(cfg, "/tmp")._val_score_numpy(_FixedModel(), _ValidationSplit())
     # Each batch has AUC 1; full-population AUC is 3/4. PR-AUC is also different.
@@ -91,30 +93,34 @@ def test_selection_uses_full_validation_roc_auc_not_mean_batch_auc():
 
 def test_auc_selection_requires_two_validation_classes():
     cfg = _config()
+    cfg["training"].pop("cold_start_validation")
     cfg["training"].update(gpus=0, checkpoint_metric="ctr_auc")
     with pytest.raises(ValueError, match="both click classes"):
         Trainer(cfg, "/tmp")._val_score_numpy(_FixedModel(), _ValidationSplit([1., 1., 1., 1.]))
 
 
-def test_default_selection_is_complete_validation_ctr_ne():
+def test_default_selection_is_complete_cold_start_validation_ctr_ne():
     cfg = _config()
     cfg["training"].update(gpus=0, eval_batch_size=3)
-    assert cfg["training"]["checkpoint_metric"] == "ctr_ne"
+    assert cfg["training"]["checkpoint_metric"] == "cold_ctr_ne"
     trainer = Trainer(cfg, "/tmp")
     score, extras = trainer._val_score_numpy(_FixedModel(), _ValidationSplit())
-    # Normalize once by the full population's entropy, not per-batch entropy.
+    # The fixed model ignores the intervention, so ordinary and cold metrics
+    # match; both are still computed once over the complete population.
     expected = -(2 * np.log(0.9) + 2 * np.log(0.2)) / (4 * np.log(2))
     assert score == pytest.approx(expected)
-    assert score == pytest.approx(extras["val_ctr_ne"])
+    assert score == pytest.approx(extras["val_cold_ctr_ne"])
+    assert extras["val_cold_ctr_ne"] == pytest.approx(extras["val_ctr_ne"])
 
     class OverconfidentModel(_FixedModel):
-        def forward(self, idx):
-            click, conversion = super().forward(idx)
+        def forward(self, idx, forced_missing=None):
+            click, conversion = super().forward(idx, forced_missing=forced_missing)
             return click * 3, conversion
 
-    worse, worse_extras = trainer._val_score_numpy(OverconfidentModel(), _ValidationSplit())
-    assert worse_extras["val_ctr_auc"] == extras["val_ctr_auc"]
-    assert worse > score  # unchanged ranking can still have worse NE
+    worse, worse_extras = trainer._val_score_numpy(
+        OverconfidentModel(), _ValidationSplit())
+    assert worse_extras["val_cold_ctr_auc"] == extras["val_cold_ctr_auc"]
+    assert worse > score
 
 
 def test_cnn_rejects_conditional_cvr_selection():
@@ -126,10 +132,27 @@ def test_cnn_rejects_conditional_cvr_selection():
 
 def test_seeded_construction_is_reproducible():
     cfg = _config()
+    cfg["model_params"]["field_dropout"] = {}
     first = build_model(cfg, {"a": 3})
     second = build_model(cfg, {"a": 3})
     for key, value in first.state_dict().items():
         torch.testing.assert_close(value, second.state_dict()[key], rtol=0, atol=0)
+
+
+def test_unversioned_checkpoint_params_restore_exact_legacy_architecture():
+    params = {
+        "emb_dim": 2,
+        "conv_channels": [2],
+        "kernel_size": 3,
+        "tower_dims": [4, 2],
+        "dropout": 0.0,
+        "alpha": 1.0,
+    }
+    legacy = CNNAttention({"a": 3}, architecture_version=1, **params)
+    restored = restore_model("cnn_attention", {"a": 3}, params)
+    assert restored.architecture_version == 1
+    assert restored.model_params["pooling"] == "sum"
+    restored.load_state_dict(legacy.state_dict())
 
 
 @pytest.mark.parametrize("metric,values,selected_epoch,saved", [
@@ -147,6 +170,8 @@ def test_selection_keeps_earlier_tie_and_restores_before_export(
             return {"a": (idx + 1, torch.ones(len(idx)), torch.arange(len(idx)))}, y, z
 
     cfg = _config()
+    cfg["model_params"]["field_dropout"] = {}
+    cfg["training"].pop("cold_start_validation")
     cfg["training"].update(epochs=len(values), gpus=0, out_dir=str(tmp_path), checkpoint_metric=metric)
     data = NumpyDataset(SmallSplit(), SmallSplit(), SmallSplit(),
                         {"a": {str(i): i for i in range(1, 5)}}, ["a"])
@@ -162,9 +187,16 @@ def test_selection_keeps_earlier_tie_and_restores_before_export(
     exported_epochs = []
     predict = trainer._predict_numpy
 
-    def record_export(model, split, *, split_name):
+    def record_export(
+        model, split, *, split_name, is_ctr_downsampled_space=False
+    ):
         exported_epochs.append(model.click_head.bias.item())
-        return predict(model, split, split_name=split_name)
+        return predict(
+            model,
+            split,
+            split_name=split_name,
+            is_ctr_downsampled_space=is_ctr_downsampled_space,
+        )
 
     monkeypatch.setattr(trainer, "_train_epoch_numpy", fake_epoch)
     monkeypatch.setattr(trainer, "_val_score_numpy", lambda *args: (next(validation), {}))
@@ -192,12 +224,15 @@ def test_real_data_training_checkpoint_reload_and_reporting(encoded, tmp_path, s
     run = runs.read_run(str(run_dir))
     assert run["status"] == runs.FINISHED
     assert run["model"] == "cnn_attention" and "logged_pctr" not in run
-    assert run["selected_on"]["metric"] == "ctr_ne"
+    assert run["selected_on"]["metric"] == "cold_ctr_ne"
     history = pd.read_csv(run_dir / "history.csv")
     assert len(history) == 2
-    assert run["selected_on"]["value"] == pytest.approx(history.val_ctr_ne.min())
-    np.testing.assert_allclose(history.val_score, history.val_ctr_ne)
+    assert run["selected_on"]["value"] == pytest.approx(
+        history.val_cold_ctr_ne.min())
+    np.testing.assert_allclose(history.val_score, history.val_cold_ctr_ne)
     assert not any("pcvr" in c or "logged" in c for c in history.columns)
+    assert history.val_attention_entropy.notna().all()
+    assert history.val_attention_min_task_weight.gt(0).all()
 
     ckpt = torch.load(run_dir / "best.pt", weights_only=False)
     assert ckpt["model_type"] == "cnn_attention"
@@ -206,8 +241,9 @@ def test_real_data_training_checkpoint_reload_and_reporting(encoded, tmp_path, s
     model.load_state_dict(ckpt["model_state_dict"])
     dataset = NumpyDataset.load(enc_dir, torch.device("cpu"), load_test=True)
     trainer = Trainer(cfg, str(CODE_DIR.parent))
-    restored_ne, _ = trainer._val_score_numpy(model, dataset.val)
-    assert restored_ne == pytest.approx(history.val_ctr_ne.min())
+    restored_ne, restored_extras = trainer._val_score_numpy(model, dataset.val)
+    assert restored_ne == pytest.approx(history.val_cold_ctr_ne.min())
+    assert restored_extras["val_attention_min_task_weight"] > 0
 
     rows = canonical_rows(run_dir)
     for split in ("train", "val", "test"):

@@ -159,8 +159,27 @@ class Trainer:
         from scripts.report_metrics import ESMM_MODELS, logged_ctcvr_splits
         self.is_esmm = self.model_name in ESMM_MODELS
         self.is_cnn_attention = self.model_name == "cnn_attention"
-        if self.is_cnn_attention and self.checkpoint_metric not in ("ctr_auc", "ctr_ne", "ctr_prauc"):
-            raise ValueError("cnn_attention checkpoint_metric must be ctr_auc, ctr_ne, or ctr_prauc")
+        self.cold_start_validation = tr.get("cold_start_validation")
+        if self.cold_start_validation is not None:
+            if not self.is_cnn_attention:
+                raise ValueError("cold_start_validation is supported only for cnn_attention")
+            self.cold_start_validation = {
+                "field": str(self.cold_start_validation["field"]),
+                "missing_rate": float(self.cold_start_validation["missing_rate"]),
+                "seed": int(self.cold_start_validation.get("seed", self.seed)),
+            }
+            if not 0 <= self.cold_start_validation["missing_rate"] <= 1:
+                raise ValueError("cold-start missing_rate must lie in [0, 1]")
+        cnn_metrics = (
+            "ctr_auc", "ctr_ne", "ctr_prauc",
+            "cold_ctr_auc", "cold_ctr_ne", "cold_ctr_prauc",
+        )
+        if self.is_cnn_attention and self.checkpoint_metric not in cnn_metrics:
+            raise ValueError(
+                "cnn_attention checkpoint_metric must be a CTR or cold-start CTR metric")
+        if self.checkpoint_metric.startswith("cold_") and self.cold_start_validation is None:
+            raise ValueError(
+                f"checkpoint_metric {self.checkpoint_metric!r} requires cold_start_validation")
         # Logged-score models validate on p*v; native ESMM only reports it on test.
         self.logged_ctcvr_splits = logged_ctcvr_splits(cfg)
         self.is_logged_ctcvr = bool(self.logged_ctcvr_splits)
@@ -228,16 +247,34 @@ class Trainer:
 
         device = self.device
         model = model.to(device)
+        if (
+            self.cold_start_validation is not None
+            and self.cold_start_validation["field"] not in model.field_ids
+        ):
+            raise ValueError(
+                "cold_start_validation names unknown field "
+                f"{self.cold_start_validation['field']!r}")
         optimizer = self._make_optimizer(model)
         checkpoint_path = os.path.join(self.out_dir, "best.pt")
         history_path = os.path.join(self.out_dir, "history.csv")
-        history_extras = tuple(
+        history_extras = list(
             f"val_{population}_{metric}"
             for name, population in _HISTORY_POPULATIONS.items()
             if name != "CTCVR-logged" or "val" in self.logged_ctcvr_splits
             if not self.is_cnn_attention or name in ("CTR", "CTCVR")
             for metric in _HISTORY_METRICS.values()
-        ) if self.is_esmm or self.is_cnn_attention else ()
+        ) if self.is_esmm or self.is_cnn_attention else []
+        if self.is_cnn_attention:
+            history_extras.extend((
+                "val_attention_click_mean",
+                "val_attention_conversion_mean",
+                "val_attention_entropy",
+                "val_attention_min_task_weight",
+            ))
+            if self.cold_start_validation is not None:
+                history_extras.extend(
+                    f"val_cold_ctr_{metric}" for metric in _HISTORY_METRICS.values())
+        history_extras = tuple(history_extras)
         with open(history_path, "w", newline="") as f:
             csv.writer(f).writerow(["epoch", "loss", "val_score", "seconds", "saved", *history_extras])
 
@@ -556,6 +593,8 @@ class Trainer:
         if self.checkpoint_metric == "pcvr_ne":
             clicked = y == 1
             return column("v")[clicked], z[clicked]
+        if self.checkpoint_metric.startswith("cold_ctr_"):
+            return column("q_cold"), y
         if self.checkpoint_metric in ("ctr_auc", "ctr_ne", "ctr_prauc"):
             return column("q" if self.is_esmm or self.is_cnn_attention else "score"), y
         if self.checkpoint_metric in ("ctcvr_prauc", "ctcvr_ne"):
@@ -596,44 +635,98 @@ class Trainer:
         )
 
     def _val_score_numpy(self, model, val_split) -> tuple[float, dict]:
-        """Score the complete validation population with the final-report evaluator."""
-        from evaluation.metrics import auc, normalized_entropy, pr_auc
+        """Score ordinary and deterministic cold-start validation populations."""
+        from evaluation.metrics import auc, compute_metrics, normalized_entropy, pr_auc
         model.eval()
-        columns, ys, zs = {}, [], []
+        columns, ys, zs, attention_parts = {}, [], [], []
         eval_batch = self.eval_batch_size
         n = len(val_split)
+        cold_mask = None
+        if self.cold_start_validation is not None:
+            rng = np.random.default_rng(self.cold_start_validation["seed"])
+            cold_mask = torch.from_numpy(
+                rng.random(n) < self.cold_start_validation["missing_rate"])
+
         with torch.no_grad():
             for start in range(0, n, eval_batch):
-                idx = torch.arange(start, min(start + eval_batch, n),
-                                   device=val_split.device)
+                stop = min(start + eval_batch, n)
+                idx = torch.arange(start, stop, device=val_split.device)
                 enc, y, z = val_split.get_batch(idx)
-                for column, score in self._batch_scores(model, val_split, idx, enc, "val",
-                                                          is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space["val"]).items():
-                    columns.setdefault(column, []).append(score.cpu())
+                batch_scores = self._batch_scores(
+                    model, val_split, idx, enc, "val",
+                    is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space["val"])
+                attention = getattr(model, "last_attention_weights", None)
+                if self.is_cnn_attention and attention is not None:
+                    attention_parts.append(attention.cpu())
+                for column, value in batch_scores.items():
+                    columns.setdefault(column, []).append(value.cpu())
+
+                if cold_mask is not None:
+                    missing = cold_mask[start:stop].to(val_split.device)
+                    click_logits, _ = model(
+                        enc,
+                        forced_missing={
+                            self.cold_start_validation["field"]: missing,
+                        },
+                    )
+                    cold_q = torch.sigmoid(click_logits).cpu()
+                    # One deployment-like population: ordinary scores on covered
+                    # rows and forced-missing scores on the configured fraction.
+                    mixed_q = torch.where(missing.cpu(), cold_q, batch_scores["q"].cpu())
+                    columns.setdefault("q_cold", []).append(mixed_q)
                 ys.append(y.cpu())
                 zs.append(z.cpu())
-        scores = {c: torch.cat(parts) for c, parts in columns.items()}
-        y, z = torch.cat(ys), torch.cat(zs)
 
+        scores = {column: torch.cat(parts) for column, parts in columns.items()}
+        y, z = torch.cat(ys), torch.cat(zs)
         score, label = self._selection_inputs(scores, y, z)
-        if self.checkpoint_metric == "ctr_auc" and not ((label == 0).any() and (label == 1).any()):
-            raise ValueError("ctr_auc checkpoint selection requires both click classes in validation")
+        if self.checkpoint_metric.endswith("_auc") and not (
+            (label == 0).any() and (label == 1).any()
+        ):
+            raise ValueError(
+                f"{self.checkpoint_metric} checkpoint selection requires both "
+                "click classes in validation")
+
         extras = {}
         if self.is_esmm or self.is_cnn_attention:
             from scripts.report_metrics import metric_rows
-            rows = metric_rows("val", self.model_name, y.numpy().astype(_LABEL_DTYPES["y"]),
-                               z.numpy().astype(_LABEL_DTYPES["z"]),
-                               {c: s.numpy() for c, s in scores.items()})
-            extras = {f"val_{_HISTORY_POPULATIONS[row['population']]}_{suffix}": row[metric]
-                      for row in rows for metric, suffix in _HISTORY_METRICS.items()}
+            rows = metric_rows(
+                "val",
+                self.model_name,
+                y.numpy().astype(_LABEL_DTYPES["y"]),
+                z.numpy().astype(_LABEL_DTYPES["z"]),
+                {column: values.numpy() for column, values in scores.items()},
+            )
+            extras = {
+                f"val_{_HISTORY_POPULATIONS[row['population']]}_{suffix}": row[metric]
+                for row in rows
+                for metric, suffix in _HISTORY_METRICS.items()
+            }
+        if "q_cold" in scores:
+            cold_metrics = compute_metrics(scores["q_cold"].numpy(), y.numpy())
+            extras.update({
+                f"val_cold_ctr_{suffix}": cold_metrics[metric]
+                for metric, suffix in _HISTORY_METRICS.items()
+            })
+        if attention_parts:
+            weights = torch.cat(attention_parts).clamp_min(torch.finfo(torch.float32).tiny)
+            extras.update({
+                "val_attention_click_mean": weights[:, 0].mean().item(),
+                "val_attention_conversion_mean": weights[:, 1].mean().item(),
+                "val_attention_entropy": (-(weights * weights.log()).sum(dim=1).mean().item()),
+                "val_attention_min_task_weight": weights.min().item(),
+            })
+
         if self.checkpoint_metric == "pcvr_ne":
             return extras["val_pcvr_ne"], extras
-        if self.checkpoint_metric == "ctr_auc":
-            # The multitask report already computed AUC over the full split;
-            # avoid sorting millions of scores a second time for selection.
-            return (extras["val_ctr_auc"] if "val_ctr_auc" in extras
-                    else auc(score.numpy(), label.numpy())), extras
-        if self.checkpoint_metric in ("ctr_ne", "ctcvr_ne", "logged_ctcvr_ne"):
+        if self.checkpoint_metric.endswith("_auc"):
+            # Multitask reporting already sorted the full population.
+            key = f"val_{self.checkpoint_metric}"
+            return (
+                extras[key] if key in extras
+                else auc(score.numpy(), label.numpy())
+            ), extras
+        if self.checkpoint_metric.endswith("_ne"):
             return normalized_entropy(score.numpy(), label.numpy()), extras
         return pr_auc(score.numpy(), label.numpy()), extras
 

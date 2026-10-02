@@ -1,0 +1,8 @@
+# Distinct evaluation name preserves the original logged-pCTR result while
+# binding this teacher-swap comparison to the current prediction cache.
+pctr_model: dcn_matched_stats_wd3e6_teacher_swap
+logged_pctr:
+  dcn_run: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z
+  predictions:
+    test: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/test.parquet
+  score_column: score

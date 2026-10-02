@@ -1,0 +1,47 @@
+# Teacher-swap experiment: balanced KD trained with the seed-44 DCN teacher.
+# The student remains seed 42, so this differs from esmm_logged_pctr_kd05 only
+# in the frozen teacher predictions used for training, selection, and matched
+# serving evaluation.
+model: esmm_logged_pctr
+
+training:
+  evaluate_test: false
+  epochs: 5
+  batch_size: 65536
+  eval_batch_size: 65536
+  lr: 0.001
+  grad_clip_norm: 0
+  seed: 42
+  shuffle_block_size: 1
+  checkpoint_metric: logged_ctcvr_ne
+  save_predictions: false
+  gpus: 1
+  load_test: false
+  out_dir: artifacts
+  keep_checkpoint: best
+  early_stopping:
+    enabled: false
+    patience: 2
+    min_delta: 0.0
+
+model_params:
+  emb_dim: 20
+  tower_dims: [460, 360, 200, 80, 2]
+  objective: kd
+  alpha: 0.5
+  aux_weight: 1.0
+
+logged_pctr:
+  dcn_run: artifacts/dcn_matched_stats_wd3e6_seed44/20260930T002529Z
+  predictions:
+    train: artifacts/dcn_matched_stats_wd3e6_seed44/20260930T002529Z/predictions/train.parquet
+    val: artifacts/dcn_matched_stats_wd3e6_seed44/20260930T002529Z/predictions/val.parquet
+    test: artifacts/dcn_matched_stats_wd3e6_seed44/20260930T002529Z/predictions/test.parquet
+  score_column: score
+
+evaluation:
+  is_logged_ctcvr: true
+
+data:
+  csv_dir: ali-ccp/extracted
+  encoded_dir: ali-ccp/encoded

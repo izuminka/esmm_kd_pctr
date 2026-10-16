@@ -1,0 +1,46 @@
+# ESMM Direct Product: train pCVR through the frozen serving product p*v.
+# This is Equation 7: mean BCE(z, stopgrad(p) * v), with no auxiliary CTR tower.
+# The run uses the full training split and the same seed-42 DCN serving factor as
+# the matched ESMM and KD experiments.
+model: esmm_direct_product
+
+training:
+  evaluate_test: false  # test belongs to the separate evaluation job
+  epochs: 5             # matched full-population ESMM/KD budget
+  batch_size: 65536
+  eval_batch_size: 65536
+  lr: 0.001
+  grad_clip_norm: 0
+  seed: 42
+  shuffle_block_size: 1
+  checkpoint_metric: logged_ctcvr_ne  # minimize validation NE of p*v
+  save_predictions: false
+  gpus: 1
+  load_test: false
+  out_dir: artifacts
+  keep_checkpoint: best
+  early_stopping:
+    enabled: false      # complete all five epochs
+    patience: 2
+    min_delta: 0.0
+
+model_params:
+  emb_dim: 20
+  tower_dims: [460, 360, 200, 80, 2]
+
+# Frozen DCN-V2 pCTR p: detached, excluded from model inputs, and used only as
+# the multiplier in the Equation 7 loss and logged CTCVR evaluation.
+logged_pctr:
+  dcn_run: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z
+  predictions:
+    train: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/train.parquet
+    val: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/val.parquet
+    test: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/test.parquet
+  score_column: score
+
+evaluation:
+  is_logged_ctcvr: true
+
+data:
+  csv_dir: ali-ccp/extracted
+  encoded_dir: ali-ccp/encoded

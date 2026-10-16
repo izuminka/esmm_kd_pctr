@@ -8,7 +8,9 @@ import pytest
 import torch
 
 from scripts.train import build_model, build_metric_fn, load_config
-from scripts.report_metrics import logged_ctcvr_splits, metric_rows
+from scripts.report_metrics import (
+    LOGGED_PCTR_TRAINING_MODELS, logged_ctcvr_splits, metric_rows,
+)
 from training.dataset import NumpyDataset
 from training.trainer import Trainer
 
@@ -39,14 +41,15 @@ def test_matched_cohort_arms_differ_only_in_training_cohort():
 @pytest.mark.parametrize("config", sorted(CONFIGS.glob("esmm*/train.yaml")), ids=lambda p: p.parent.name)
 def test_native_and_logged_configs_use_their_prescribed_validation_score(config):
     cfg = load_config(config)
-    logged = cfg["model"] == "esmm_logged_pctr"
+    logged = cfg["model"] in LOGGED_PCTR_TRAINING_MODELS
     native_metric = "ctcvr_ne"
     if config.parent.name.startswith("esmm_ctr_reference_"):
         native_metric = "ctr_ne"
         assert cfg["training"]["evaluate_test"] is False
         assert cfg["training"]["load_test"] is False
     kd_ne = config.parent.name.startswith(("esmm_logged_pctr_kd_teacher", "esmm_logged_pctr_kd05", "esmm_logged_pctr_kd03", "esmm_logged_pctr_kd07")) and "2x_aux" not in config.parent.name
-    logged_metric = "logged_ctcvr_ne" if kd_ne else "logged_ctcvr_prauc"
+    logged_ne = kd_ne or cfg["model"] == "esmm_direct_product"
+    logged_metric = "logged_ctcvr_ne" if logged_ne else "logged_ctcvr_prauc"
     assert cfg["training"]["checkpoint_metric"] == (logged_metric if logged else native_metric)
     assert ("val" in logged_ctcvr_splits(cfg)) == logged
     assert "train" not in logged_ctcvr_splits(cfg)

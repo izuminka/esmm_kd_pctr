@@ -1,8 +1,8 @@
 """Logged pCTR end to end through scripts/train.py on the real-data fixture.
 
 A small DCN is trained first and becomes the logged pCTR source. ESMM-based
-runs then point at it: the logged-pCTR arms (kd and product), and the plain
-ESMM controls selected on the native CTCVR product. Each run must train, record
+runs then point at it: the logged-pCTR KD arm, standalone ESMM Direct Product,
+and plain ESMM controls selected on the native CTCVR product. Each run must train, record
 exactly which DCN files it used, and report CTCVR on the logged product.
 """
 
@@ -21,6 +21,7 @@ import yaml
 
 from training import runs
 
+LOGGED_TRAINING_MODELS = {"esmm_logged_pctr", "esmm_direct_product"}
 CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPLITS = ("train", "val", "test")
 
@@ -73,8 +74,8 @@ def logged_runs(encoded, tmp_path_factory):
                                     {**esmm_params, "objective": "kd_tau", "alpha": 0.5, "aux_weight": 1.0}),
         "esmm_logged_pctr_kd": ("esmm_logged_pctr", "logged_ctcvr_prauc", True,
                                 {**esmm_params, "objective": "kd", "alpha": 0.5, "aux_weight": 2.0}),
-        "esmm_logged_pctr_product": ("esmm_logged_pctr", "logged_ctcvr_prauc", False,
-                                     {**esmm_params, "objective": "product"}),
+        "esmm_direct_product": ("esmm_direct_product", "logged_ctcvr_prauc", False,
+                                esmm_params),
         "esmm_native_select": ("esmm", "ctcvr_prauc", True, esmm_params),
         "esmm_native_2x": ("esmm", "ctcvr_prauc", False, {**esmm_params, "aux_weight": 2.0}),
     }
@@ -84,8 +85,8 @@ def logged_runs(encoded, tmp_path_factory):
                                   "training": _training(artifacts, metric, save_predictions),
                                   "model_params": params, "logged_pctr": {**logged_pctr, "predictions":
                                       {s: f for s, f in logged_pctr["predictions"].items()
-                                       if s == "test" or (s == "train" and model == "esmm_logged_pctr")
-                                       or (s == "val" and model == "esmm_logged_pctr")}},
+                                       if s == "test" or (s == "train" and model in LOGGED_TRAINING_MODELS)
+                                       or (s == "val" and model in LOGGED_TRAINING_MODELS)}},
                                   "data": {"encoded_dir": enc_dir, **({"nonclick_sampling": {"rate": .5, "seed": 2026}}
                                            if params.get("objective") == "kd_tau" else {})}})
         done = _train(path, best_file)
@@ -116,7 +117,7 @@ def logged_runs(encoded, tmp_path_factory):
             "arms": arms, "enc_dir": enc_dir}
 
 
-ESMM_RUNS = ["esmm_logged_pctr_kd_tau", "esmm_logged_pctr_kd", "esmm_logged_pctr_product", "esmm_native_select", "esmm_native_2x"]
+ESMM_RUNS = ["esmm_logged_pctr_kd_tau", "esmm_logged_pctr_kd", "esmm_direct_product", "esmm_native_select", "esmm_native_2x"]
 
 
 @pytest.mark.parametrize("name", ESMM_RUNS)
@@ -136,13 +137,13 @@ def test_every_esmm_run_reports_ctcvr_on_the_logged_product(logged_runs, name):
     run_dir = logged_runs["runs"][name]
     with metric_report(run_dir) as f:
         rows = json.load(f)
-    expected = (["CTCVR-logged", "pCVR"] if name == "esmm_logged_pctr_product"
+    expected = (["CTCVR-logged", "pCVR"] if name == "esmm_direct_product"
                 else ["CTR", "CTCVR", "CTCVR-logged", "pCVR"])
 
     for split in SPLITS:
         assert [r["population"] for r in rows if r["split"] == split] == [
             p for p in expected if split == "test" or p != "CTCVR-logged"
-            or (split == "val" and logged_runs["arms"][name][0] == "esmm_logged_pctr")], split
+            or (split == "val" and logged_runs["arms"][name][0] in LOGGED_TRAINING_MODELS)], split
     assert set(runs.read_run(run_dir)["test"]) == set(expected)
 
 
@@ -154,8 +155,8 @@ def test_every_output_names_the_dcn_files_used(logged_runs, name):
 
     source = runs.read_run(run_dir)["logged_pctr"]
     assert source["dcn_run"] == block["dcn_run"] and source["run_id"] == dcn_run_id
-    used = {"train", "test"} if logged_runs["arms"][name][0] == "esmm_logged_pctr" else {"test"}
-    if logged_runs["arms"][name][0] == "esmm_logged_pctr":
+    used = {"train", "test"} if logged_runs["arms"][name][0] in LOGGED_TRAINING_MODELS else {"test"}
+    if logged_runs["arms"][name][0] in LOGGED_TRAINING_MODELS:
         used.add("val")
     assert {s: f["file"] for s, f in source["files"].items()} == {s: block["predictions"][s] for s in used}
 
@@ -179,13 +180,13 @@ def test_every_output_names_the_dcn_files_used(logged_runs, name):
 def test_history_tracks_the_prescribed_validation_metrics(logged_runs, name):
     with open(os.path.join(logged_runs["runs"][name], "history.csv"), newline="") as f:
         (row,) = list(csv.DictReader(f))
-    assert any("logged" in c for c in row) == (logged_runs["arms"][name][0] == "esmm_logged_pctr")
+    assert any("logged" in c for c in row) == (logged_runs["arms"][name][0] in LOGGED_TRAINING_MODELS)
     with metric_report(logged_runs["runs"][name]) as f:
         pcvr = next(r for r in json.load(f) if r["split"] == "val" and r["population"] == "pCVR")
     for metric, column in (("auc", "auc"), ("pr_auc", "prauc"), ("ne", "ne"), ("ce", "ce")):
         # This small real-data fixture has no validation conversions; AUC is undefined.
         assert float(row[f"val_pcvr_{column}"]) == pytest.approx(pcvr[metric], nan_ok=True)
-    if name == "esmm_logged_pctr_product":
+    if name == "esmm_direct_product":
         assert row["val_ctcvr_prauc"] == ""
     else:
         assert float(row["val_ctcvr_prauc"]) >= 0
@@ -212,6 +213,12 @@ def test_checkpoint_rebuilds_the_arm(logged_runs):
     assert ckpt["model_type"] == "esmm_logged_pctr"
     assert {k: ckpt["model_params"][k] for k in ("objective", "alpha", "aux_weight")} == {
         "objective": "kd", "alpha": 0.5, "aux_weight": 2.0}
+
+    direct = torch.load(
+        os.path.join(logged_runs["runs"]["esmm_direct_product"], "best.pt"),
+        weights_only=False)
+    assert direct["model_type"] == "esmm_direct_product"
+    assert set(direct["model_params"]) == {"emb_dim", "tower_dims"}
 
     esmm = torch.load(os.path.join(logged_runs["runs"]["esmm_native_2x"], "best.pt"), weights_only=False)
     assert esmm["model_type"] == "esmm" and esmm["model_params"]["aux_weight"] == 2.0

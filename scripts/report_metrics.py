@@ -42,8 +42,11 @@ _PAPER_CNN_ATTENTION_CTR_AUC = 0.661
 _LABEL_COLUMNS = ("sample_id", "y", "z")
 
 
-# Models reporting ESMM's heads (q, v) rather than a single score.
-ESMM_MODELS = ("esmm", "esmm_logged_pctr")
+# Models reporting ESMM-shaped outputs (optional q, required v) rather than a
+# single score. Logged-training models need p on train and validation because p
+# participates in their objective and checkpoint metric.
+ESMM_MODELS = ("esmm", "esmm_logged_pctr", "esmm_direct_product")
+LOGGED_PCTR_TRAINING_MODELS = ("esmm_logged_pctr", "esmm_direct_product")
 
 
 def logged_ctcvr_splits(cfg: dict) -> frozenset[str]:
@@ -52,9 +55,9 @@ def logged_ctcvr_splits(cfg: dict) -> frozenset[str]:
     if cfg["model"] not in ESMM_MODELS:
         return frozenset()
     # Native ESMM defaults to native metrics; explicit legacy flags still work.
-    legacy_logged = cfg["model"] == "esmm_logged_pctr" or "logged_pctr" in cfg
+    legacy_logged = cfg["model"] in LOGGED_PCTR_TRAINING_MODELS or "logged_pctr" in cfg
     splits = {"test"} if evaluation.get("is_logged_ctcvr", legacy_logged) else set()
-    if cfg["model"] == "esmm_logged_pctr":
+    if cfg["model"] in LOGGED_PCTR_TRAINING_MODELS:
         splits.add("val")
     return frozenset(splits)
 

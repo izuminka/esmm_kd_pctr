@@ -156,8 +156,11 @@ class Trainer:
         self.keep_checkpoint = tr.get("keep_checkpoint", "best")
         if self.keep_checkpoint not in ("best", "last"):
             raise ValueError(f"keep_checkpoint must be 'best' or 'last', got {self.keep_checkpoint!r}")
-        from scripts.report_metrics import ESMM_MODELS, logged_ctcvr_splits
+        from scripts.report_metrics import (
+            ESMM_MODELS, LOGGED_PCTR_TRAINING_MODELS, logged_ctcvr_splits,
+        )
         self.is_esmm = self.model_name in ESMM_MODELS
+        self.uses_logged_pctr_for_training = self.model_name in LOGGED_PCTR_TRAINING_MODELS
         self.is_cnn_attention = self.model_name == "cnn_attention"
         self.cold_start_validation = tr.get("cold_start_validation")
         if self.cold_start_validation is not None:
@@ -233,14 +236,14 @@ class Trainer:
             raise ValueError("cnn_attention requires the encoded NumpyDataset pipeline")
 
         needed = set(self.logged_ctcvr_splits)
-        if self.model_name == "esmm_logged_pctr":
+        if self.uses_logged_pctr_for_training:
             needed.add("train")
         for split_name in needed:
             split = getattr(dataset, split_name)
             if split is not None and not (use_numpy and split.logged_pctr is not None):
                 raise ValueError(f"{self.model_name} needs logged pCTR on the encoded {split_name} split")
         if self.checkpoint_metric in ("logged_ctcvr_prauc", "logged_ctcvr_ne") and "val" not in self.logged_ctcvr_splits:
-            raise ValueError("validation p*v requires esmm_logged_pctr; native ESMM validates on q*v")
+            raise ValueError("validation p*v requires a logged-pCTR training model; native ESMM validates on q*v")
 
         random.seed(self.seed)
         os.makedirs(self.out_dir, exist_ok=True)
@@ -342,8 +345,9 @@ class Trainer:
                     ckpt_data["model_params"] = {
                         "emb_dim": model.emb_dim,
                         "tower_dims": model.tower_dims,
-                        "aux_weight": model.aux_weight,
                     }
+                    if self.model_name in ("esmm", "esmm_logged_pctr"):
+                        ckpt_data["model_params"]["aux_weight"] = model.aux_weight
                 if self.model_name == "esmm_logged_pctr":
                     ckpt_data["model_params"].update(
                         objective=model.objective, alpha=model.alpha,
@@ -532,6 +536,10 @@ class Trainer:
             loss = model.loss(
                 q, v, y, z, split_data.logged_pctr[batch_idx],
                 is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space["train"])
+        elif self.model_name == "esmm_direct_product":
+            _, v = model(enc)
+            loss = model.loss(
+                z, split_data.logged_pctr[batch_idx], v)
         elif self.model_name == "esmm":
             from models.esmm import esmm_loss
             q, v = model(enc)

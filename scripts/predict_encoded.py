@@ -57,6 +57,9 @@ def build_model(model_type: str, vocab_sizes: dict, params: dict):
     if model_type == "esmm_logged_pctr":
         from models.esmm_logged_pctr import LoggedPctrESMM
         return LoggedPctrESMM(vocab_sizes, **params)
+    if model_type == "esmm_direct_product":
+        from models.esmm_direct_product import ESMMDirectProduct
+        return ESMMDirectProduct(vocab_sizes, **params)
     if model_type == "cnn_attention":
         from models.cnn_attention import CNNAttention
         # Checkpoints created before the robust architecture was versioned have

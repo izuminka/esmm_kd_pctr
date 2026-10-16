@@ -32,7 +32,7 @@ if _CODE_DIR not in sys.path:
     sys.path.insert(0, _CODE_DIR)
 
 from data.logged_pctr import attach_logged_pctr
-from scripts.report_metrics import logged_ctcvr_splits
+from scripts.report_metrics import LOGGED_PCTR_TRAINING_MODELS, logged_ctcvr_splits
 from training import cohorts, downsampling, runs
 from training.trainer import Trainer, resolve_device
 from training.dataset import NumpyDataset
@@ -67,6 +67,9 @@ def build_model(cfg: dict, vocab_sizes: dict):
     if cfg["model"] == "esmm_logged_pctr":
         from models.esmm_logged_pctr import LoggedPctrESMM
         return LoggedPctrESMM(vocab_sizes, **downsampling.training_model_params(cfg))
+    if cfg["model"] == "esmm_direct_product":
+        from models.esmm_direct_product import ESMMDirectProduct
+        return ESMMDirectProduct(vocab_sizes, **params)
     if cfg["model"] == "cnn_attention":
         from models.cnn_attention import CNNAttention
         return CNNAttention(vocab_sizes, **params)
@@ -92,7 +95,7 @@ def build_metric_fn(cfg: dict):
         rate = sampling["rate"] if sampling else downsampling.DEFAULT_NONCLICK_RATE
         return lambda model, enc, y, z: evaluate_esmm(
             model, enc, y, z, is_logged_ctcvr=False, nonclick_rate=rate)[population][metric]
-    if cfg["model"] in ("esmm_logged_pctr", "cnn_attention"):
+    if cfg["model"] in (*LOGGED_PCTR_TRAINING_MODELS, "cnn_attention"):
         return None  # encoded data path only, where the trainer scores validation itself
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 
@@ -123,14 +126,14 @@ def main():
     # optional test reporting.
     logged_splits = logged_ctcvr_splits(cfg)
     is_logged_ctcvr = bool(logged_splits)
-    is_logged_pctr_used = is_logged_ctcvr or cfg["model"] == "esmm_logged_pctr"
+    is_logged_pctr_used = is_logged_ctcvr or cfg["model"] in LOGGED_PCTR_TRAINING_MODELS
     if is_logged_pctr_used and "logged_pctr" not in cfg:
         raise ValueError(f"{args.config}: an {cfg['model']} config needs a logged_pctr block "
                          "naming the DCN run and predictions files the logged pCTR comes from "
                          "(or evaluation.is_logged_ctcvr: false for plain ESMM)")
     if cfg["training"].get("checkpoint_metric") in ("logged_ctcvr_prauc", "logged_ctcvr_ne") and "val" not in logged_splits:
-        raise ValueError("logged CTCVR checkpoint selection requires esmm_logged_pctr: "
-                         "native ESMM validates on q*v")
+        raise ValueError("logged CTCVR checkpoint selection requires a logged-pCTR "
+                         "training model; native ESMM validates on q*v")
 
     encoded_dir = os.path.join(_ROOT_DIR, cfg["data"]["encoded_dir"])
     if not os.path.exists(encoded_dir):
@@ -158,7 +161,8 @@ def main():
         needed_splits = {s: split for s, split in
                          {"train": dataset.train, "val": dataset.val, "test": dataset.test}.items()
                          if split is not None and
-                         (s in logged_splits or (s == "train" and cfg["model"] == "esmm_logged_pctr"))}
+                         (s in logged_splits or
+                          (s == "train" and cfg["model"] in LOGGED_PCTR_TRAINING_MODELS))}
         if needed_splits:
             logged_pctr_source = attach_logged_pctr(
                 cfg["logged_pctr"], _ROOT_DIR, needed_splits)

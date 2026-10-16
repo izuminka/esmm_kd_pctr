@@ -54,6 +54,9 @@ def build_model(model_type: str, vocab_sizes: dict, params: dict):
     if model_type == "esmm":
         from models.esmm import ESMM
         return ESMM(vocab_sizes, **params)
+    if model_type == "esmm_dcn":
+        from models.esmm_dcn import ESMMDCN
+        return ESMMDCN(vocab_sizes, **params)
     if model_type == "esmm_logged_pctr":
         from models.esmm_logged_pctr import LoggedPctrESMM
         return LoggedPctrESMM(vocab_sizes, **params)
@@ -122,7 +125,7 @@ def main():
             run_cfg = yaml.safe_load(f)
     else:
         run_cfg = cfg
-    params = (ckpt["model_params"] if (ckpt["model_type"] == "cnn_attention"
+    params = (ckpt["model_params"] if (ckpt["model_type"] in ("cnn_attention", "esmm_dcn")
               or ckpt.get("model_params", {}).get("objective") == "kd_tau")
               else run_cfg.get("model_params", {}))
     model = build_model(ckpt["model_type"], ckpt["vocab_sizes"], params).to(device)

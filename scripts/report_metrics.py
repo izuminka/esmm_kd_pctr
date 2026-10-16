@@ -45,7 +45,7 @@ _LABEL_COLUMNS = ("sample_id", "y", "z")
 # Models reporting ESMM-shaped outputs (optional q, required v) rather than a
 # single score. Logged-training models need p on train and validation because p
 # participates in their objective and checkpoint metric.
-ESMM_MODELS = ("esmm", "esmm_logged_pctr", "esmm_direct_product")
+ESMM_MODELS = ("esmm", "esmm_logged_pctr", "esmm_direct_product", "esmm_dcn")
 LOGGED_PCTR_TRAINING_MODELS = ("esmm_logged_pctr", "esmm_direct_product")
 
 

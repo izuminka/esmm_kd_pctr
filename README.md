@@ -72,6 +72,30 @@ The real-data integration tests (anything using the `real_batch` fixture)
 take a few minutes, dominated by scanning the common-features file for the
 join -- this is expected, not a hang.
 
+## ESMM with a DCN CTR head
+
+`esmm_dcn` replaces the existing ESMM CTR head with the matched DCN
+architecture. It retains ESMM's shared embeddings, pCVR tower, loss
+`BCE(y, q) + BCE(y*z, q*v)`, and optimizer settings. Both heads and their shared
+embeddings train together from scratch without KD or teacher scores.
+The standalone DCN optimizer is not used: this baseline keeps the rest of
+the ESMM training recipe unchanged. Its recipe is
+`configs/esmm_dcn/train.yaml`.
+
+From the project root, prepare a reproducible four-seed study with:
+
+```bash
+code/.venv/bin/python code/scripts/run_esmm_dcn_study.py
+```
+
+Preparation saves configs, the complete working source, its Git diff, and a
+submission manifest under `artifacts/esmm_dcn_studies/`. Add `--submit`
+to launch seeds 42–45 as four concurrent Slurm GPU jobs plus a dependent CPU
+report. Each seed trains for five epochs, keeps the minimum validation native
+CTCVR NE checkpoint, and then evaluates pCVR, CTR, native CTCVR `q*v`, and
+logged CTCVR `p*v` using the original frozen seed-42 DCN. `--report-study DIR`
+regenerates per-seed results and mean ± SEM from the exact recorded run paths.
+
 ## Status
 
 Built so far: data pipeline, ESMM, DCN-V2, evaluation metrics, and

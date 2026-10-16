@@ -64,6 +64,9 @@ def build_model(cfg: dict, vocab_sizes: dict):
     if cfg["model"] == "esmm":
         from models.esmm import ESMM
         return ESMM(vocab_sizes, **params)
+    if cfg["model"] == "esmm_dcn":
+        from models.esmm_dcn import ESMMDCN
+        return ESMMDCN(vocab_sizes, **params)
     if cfg["model"] == "esmm_logged_pctr":
         from models.esmm_logged_pctr import LoggedPctrESMM
         return LoggedPctrESMM(vocab_sizes, **downsampling.training_model_params(cfg))
@@ -81,7 +84,7 @@ def build_metric_fn(cfg: dict):
         from evaluation.dcn import evaluate_dcn
         metric = "ne" if cfg["training"].get("checkpoint_metric") == "ctr_ne" else "pr_auc"
         return lambda model, enc, y: evaluate_dcn(model, enc, y)["ctr"][metric]
-    if cfg["model"] == "esmm":
+    if cfg["model"] in ("esmm", "esmm_dcn"):
         from evaluation.esmm import evaluate_esmm
         metric_name = cfg["training"].get("checkpoint_metric", "ctcvr_prauc")
         population, metric = {

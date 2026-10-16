@@ -341,7 +341,9 @@ class Trainer:
                     "vocab_sizes": dataset.vocab_sizes,
                     "split_rule": SPLIT_RULE,
                 }
-                if self.is_esmm:
+                if self.model_name == "esmm_dcn":
+                    ckpt_data["model_params"] = model.model_params
+                elif self.is_esmm:
                     ckpt_data["model_params"] = {
                         "emb_dim": model.emb_dim,
                         "tower_dims": model.tower_dims,
@@ -395,7 +397,7 @@ class Trainer:
         else:
             for split_name, imps in [("train", dataset.train), ("val", dataset.val), ("test", dataset.test)]:
                 t0 = time.perf_counter()
-                if self.model_name == "esmm":
+                if self.model_name in ("esmm", "esmm_dcn"):
                     ids, ys, zs, qs, vs = self.predict_esmm(
                         model, imps, dataset.vocabs, field_ids,
                         is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[split_name])
@@ -540,7 +542,7 @@ class Trainer:
             _, v = model(enc)
             loss = model.loss(
                 z, split_data.logged_pctr[batch_idx], v)
-        elif self.model_name == "esmm":
+        elif self.model_name in ("esmm", "esmm_dcn"):
             from models.esmm import esmm_loss
             q, v = model(enc)
             loss = esmm_loss(y, z, q, v, model.aux_weight)
@@ -748,7 +750,7 @@ class Trainer:
         Gradient zeroing and optimizer.step() are the caller's responsibility.
         Returns the scalar loss value for logging.
         """
-        if self.model_name == "esmm":
+        if self.model_name in ("esmm", "esmm_dcn"):
             return self._train_step_esmm(model, batch, vocabs, field_ids)
 
         from models.dcn import dcn_loss  # late import keeps trainer model-agnostic

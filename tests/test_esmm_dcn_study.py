@@ -65,7 +65,7 @@ def test_prepare_snapshots_uncommitted_source_and_private_seed_configs(prepared)
         assert not Path(job["registry"]).exists()
     train = (study / "train.sbatch").read_text()
     assert "--array=0-3%4" in train and "--gres=gpu:1" in train
-    assert "--run-seed" in train and "--gres" not in (study / "report.sbatch").read_text()
+    assert "--run-index" in train and "--gres" not in (study / "report.sbatch").read_text()
     (code / "new_model.py").write_text("CHANGED = True\n")
     study_cli._verify_inputs(manifest)  # Active working-tree edits cannot alter queued jobs.
     (snapshot / "new_model.py").write_text("CHANGED = True\n")
@@ -108,6 +108,48 @@ def test_canonical_esmm_dcn_rejects_a_branch_specific_optimizer(prepared):
     cfg["training"]["dcn_optimizer"] = {"lr": .0005}
     with pytest.raises(ValueError, match="retains the ESMM optimizer"):
         study_cli._check_config(cfg)
+
+
+def test_prepare_continuation_seeds_maps_array_indices_through_manifest(prepared, monkeypatch):
+    study, root, code = prepared
+    original = study_cli._manifest(study)
+    seeds = (46, 47, 48, 49, 50, 51)
+    continuation = study_cli.prepare(root / "continuation", study / "configs/base_train.yaml",
+                                     original["logged_config"], code=code, root=root, seeds=seeds)
+    manifest = study_cli._manifest(continuation)
+    assert manifest["seeds"] == list(seeds)
+    assert [job["seed"] for job in manifest["jobs"]] == list(seeds)
+    assert "--array=0-5%4" in (continuation / "train.sbatch").read_text()
+    assert "42 +" not in (continuation / "train.sbatch").read_text()
+    calls = []
+    monkeypatch.setattr(study_cli, "run_seed", lambda location, seed: calls.append((location, seed)))
+    study_cli.run_index(continuation, 0)
+    study_cli.run_index(continuation, 5)
+    assert calls == [(continuation, 46), (continuation, 51)]
+    with pytest.raises(ValueError, match="outside study jobs"):
+        study_cli.run_index(continuation, -1)
+    with pytest.raises(ValueError, match="outside study jobs"):
+        study_cli.run_index(continuation, 6)
+
+
+@pytest.mark.parametrize("seeds", [(), (42,), (42, 42), (-1, 42), (True, 42), (42, 43.0)])
+def test_prepare_rejects_invalid_seed_lists_before_creating_study(prepared, seeds):
+    study, root, code = prepared
+    manifest = study_cli._manifest(study)
+    target = root / "invalid"
+    with pytest.raises(ValueError, match="at least two unique nonnegative integers"):
+        study_cli.prepare(target, study / "configs/base_train.yaml", manifest["logged_config"],
+                          code=code, root=root, seeds=seeds)
+    assert not target.exists()
+
+
+def test_cli_passes_explicit_seeds_to_prepare(prepared, monkeypatch):
+    study, _, _ = prepared
+    calls = []
+    monkeypatch.setattr(study_cli, "prepare", lambda *args, **kwargs: calls.append(kwargs) or study)
+    study_cli.main(["--config", str(study / "configs/base_train.yaml"),
+                    "--seeds", "46", "47", "48", "49", "50", "51"])
+    assert calls[0]["seeds"] == [46, 47, 48, 49, 50, 51]
 
 
 def test_run_seed_uses_private_registry_then_immutable_record(prepared, monkeypatch):
@@ -161,6 +203,10 @@ def test_submit_records_array_and_afterok_report(prepared, monkeypatch):
 @pytest.fixture
 def finished(prepared):
     study, root, _ = prepared
+    return finish_study(study, root)
+
+
+def finish_study(study, root):
     manifest = study_cli._manifest(study)
     for job in manifest["jobs"]:
         run = root / "artifacts" / job["arm"] / "r1"
@@ -188,6 +234,32 @@ def finished(prepared):
                                               "run_dir": str(run),
                                               "config_sha256": study_cli._hash(run / "config.yaml")})
     return study, root, manifest
+
+
+def test_ten_seed_report_requires_every_requested_seed_and_computes_sem(prepared):
+    old_study, root, code = prepared
+    seeds = tuple(range(42, 52))
+    study = study_cli.prepare(root / "ten_seeds", old_study / "configs/base_train.yaml",
+                             study_cli._manifest(old_study)["logged_config"],
+                             code=code, root=root, seeds=seeds)
+    _, _, manifest = finish_study(study, root)
+    # A ten-seed study cannot silently report its first nine finished runs.
+    missing = manifest["jobs"].pop()
+    write_json(study / "submission.json", manifest)
+    with pytest.raises(ValueError, match="exactly manifest seeds 42–51"):
+        study_cli.report(study)
+    assert not (study / "seed_summary.json").exists()
+    manifest["jobs"].append(missing)
+    write_json(study / "submission.json", manifest)
+    path = study_cli.report(study)
+    summary = json.loads((study / "seed_summary.json").read_text())
+    assert len(summary["per_seed"]) == 40
+    assert [source["seed"] for source in summary["sources"]] == list(seeds)
+    assert all(row["n"] == 10 for row in summary["summary"])
+    auc = next(row for row in summary["summary"] if row["metric"] == "auc")
+    assert auc["mean"] == pytest.approx(.465)
+    assert auc["sem"] == pytest.approx(.009574271077563381)
+    assert "seeds 42–51 (n=10)" in path.read_text()
 
 
 def test_report_aggregates_all_four_populations_without_latest_pointers(finished):

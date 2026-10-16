@@ -25,8 +25,10 @@ from plot_downsampled_esmm_comparison import (
     OUT,
     POPS,
     RUNS,
+    comparison_title,
     load_records,
     load_seed_records,
+    load_summary_records,
 )
 
 STEM = "esmm_downsampled_5pct_comparison_acm_format"
@@ -48,17 +50,24 @@ def main():
         action="store_true",
         help="Plot the canonical seed-42 runs without error bars",
     )
+    source.add_argument(
+        "--summary",
+        type=Path,
+        help="Combined manuscript seed_summary.json with ten seeds per variant",
+    )
     args = parser.parse_args()
 
     records = (
         load_records()
         if args.single_seed
+        else load_summary_records(args.summary)
+        if args.summary
         else load_seed_records(args.seed_studies)
     )
     stem = STEM + "_single_seed" if args.single_seed else STEM
     OUT.mkdir(exist_ok=True)
     with (OUT / f"{stem}_data.csv").open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(records[0]))
+        writer = csv.DictWriter(stream, fieldnames=list(records[0]), lineterminator="\n")
         writer.writeheader()
         writer.writerows(records)
 
@@ -153,12 +162,16 @@ def main():
     fig.subplots_adjust(
         left=0.07, right=0.98, top=0.99, bottom=0.10, hspace=0.24
     )
+    fig.suptitle(comparison_title(records, args.single_seed), fontsize=13, y=1.06)
     for extension in ("png", "pdf", "svg"):
         fig.savefig(
             OUT / f"{stem}.{extension}",
             dpi=220,
             bbox_inches="tight",
         )
+        if extension == "svg":
+            path = OUT / f"{stem}.{extension}"
+            path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
     plt.close(fig)
     print(f"Wrote {OUT / stem} (PNG, PDF, SVG, CSV)")
 

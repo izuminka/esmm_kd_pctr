@@ -3,9 +3,11 @@
 Copied from plot_esmm_comparison_acm_format.py; preserves its source data,
 colors, error bars, axis limits, and grid styling; sizes for one column.
 Run from project root:
-    code/.venv/bin/python code/scripts/plot_esmm_comparison_auc_ne.py
+    code/.venv/bin/python code/scripts/plot_esmm_comparison_auc_ne.py \
+        --summary artifacts/paper_seed_studies/20261015_ten_seeds/seed_summary.json
 Outputs PNG, PDF, SVG, and plotted CSV in paper/main/figures.
 """
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -21,8 +23,8 @@ from matplotlib.ticker import MaxNLocator, ScalarFormatter
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "paper/main/figures"
 MODELS = [
-    ("ESMM", "20260918T182214Z_4aUNTa", "#0072B2"),
-    ("KD–0.5", "20260918T180705Z_KBm7rX", "#CC79A7"),
+    ("ESMM", "esmm", "#0072B2"),
+    ("KD–0.5", "kd05", "#CC79A7"),
 ]
 POPS = [("pCVR", "pCVR"), ("CTCVR-logged", "Logged CTCVR\n(p × v)")]
 METRICS = [
@@ -32,23 +34,28 @@ METRICS = [
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--summary", required=True, type=Path,
+                        help="validated ten-seed summary from report_paper_ten_seeds.py")
+    args = parser.parse_args()
     OUT.mkdir(exist_ok=True)
     records = []
     lookup = {}
-    for model, study, _ in MODELS:
-        source = ROOT / "artifacts/esmm_studies" / study / "seed_summary.json"
-        if not source.is_file():
-            source = ROOT / "artifacts copy/esmm_studies" / study / "seed_summary.json"
-        data = json.loads(source.read_text())
-        assert sorted(s["seed"] for s in data["sources"]) == [42, 43, 44, 45]
+    source = args.summary.resolve()
+    data = json.loads(source.read_text())
+    for model, variant, _ in MODELS:
+        seeds = sorted(s["seed"] for s in data["sources"] if s["variant"] == variant)
+        if seeds != list(range(42, 52)):
+            raise ValueError(f"{variant}: expected exactly seeds 42--51, got {seeds}")
         for pop, _ in POPS:
             for metric, _ in METRICS:
                 row = next(
                     r
                     for r in data["summary"]
-                    if r["population"] == pop and r["metric"] == metric
+                    if r["variant"] == variant and r["population"] == pop and r["metric"] == metric
                 )
-                assert row["n"] == 4
+                if row["n"] != 10:
+                    raise ValueError(f"{variant}: expected ten observations")
                 lookup[model, pop, metric] = (row["mean"], row["sem"])
                 records.append(
                     dict(
@@ -57,14 +64,14 @@ def main():
                         metric=metric,
                         mean=row["mean"],
                         sem=row["sem"],
-                        n=4,
+                        n=10,
                         source=str(source.relative_to(ROOT)),
                     )
                 )
     with (OUT / "esmm_comparison_auc_ne_data.csv").open(
         "w", newline=""
     ) as f:
-        writer = csv.DictWriter(f, fieldnames=list(records[0]))
+        writer = csv.DictWriter(f, fieldnames=list(records[0]), lineterminator="\n")
         writer.writeheader()
         writer.writerows(records)
 
@@ -128,6 +135,9 @@ def main():
     for ext in ("png", "pdf", "svg"):
         fig.savefig(OUT / f"esmm_comparison_auc_ne.{ext}", dpi=300,
                     bbox_inches="tight", pad_inches=0.02)
+        if ext == "svg":
+            path = OUT / f"esmm_comparison_auc_ne.{ext}"
+            path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
     plt.close(fig)
 
 

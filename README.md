@@ -96,6 +96,40 @@ CTCVR NE checkpoint, and then evaluates pCVR, CTR, native CTCVR `q*v`, and
 logged CTCVR `p*v` using the original frozen seed-42 DCN. `--report-study DIR`
 regenerates per-seed results and mean ± SEM from the exact recorded run paths.
 
+For a different prespecified seed set, add `--seeds 42 43 44 45 46 47 48 49 50 51`.
+Array tasks map to the seeds recorded in the study manifest.
+
+## Ten-seed manuscript results
+
+The combined study covers full-data ESMM, ESMM + DCN, KD at alpha 0, 0.3,
+0.5, and 0.7, and both 5% nonclick-retention variants in Table 2. It uses
+student seeds 42–51, one frozen seed-42 teacher, and sampling seed 2026.
+Existing finished runs are pinned before submission; only missing runs train.
+
+From the project root:
+
+```bash
+code/.venv/bin/python code/scripts/run_paper_seed_study.py --prepare artifacts/paper_seed_studies/NEW_STUDY
+code/.venv/bin/python code/scripts/run_paper_seed_study.py --submit artifacts/paper_seed_studies/NEW_STUDY
+code/.venv/bin/python code/scripts/report_paper_ten_seeds.py --study-dir artifacts/paper_seed_studies/NEW_STUDY
+code/.venv/bin/python code/scripts/plot_esmm_comparison_auc_ne.py --summary artifacts/paper_seed_studies/NEW_STUDY/seed_summary.json
+code/.venv/bin/python code/scripts/plot_downsampled_esmm_comparison_acm_format.py --summary artifacts/paper_seed_studies/NEW_STUDY/seed_summary.json
+```
+
+Preparation snapshots tracked and untracked working source, records hashes,
+and creates private per-run registries. The Slurm array runs up to four jobs
+at once, each with one GPU and four CPU cores. After each GPU task exports
+test predictions, a corresponding CPU task scores them, with up to eight
+scoring tasks running concurrently. GPUs can start later seeds while CPU
+scoring continues. A failed task can resume its
+recorded run without selecting a different checkpoint or consulting `latest`.
+The report requires all ten seeds for every variant, matching training
+configurations, five epochs, the prescribed validation checkpoint rule,
+identical test populations, and checkpoint-bound serving metrics from the
+fixed teacher. It writes per-seed values, means, and SEMs (sample standard
+deviation divided by sqrt(10)), plus both manuscript tables. An incomplete
+study cannot produce a new aggregate.
+
 ## Status
 
 Built so far: data pipeline, ESMM, DCN-V2, evaluation metrics, and

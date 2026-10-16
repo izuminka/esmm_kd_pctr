@@ -8,6 +8,7 @@ By default plots means ± SEM across training seeds 42–45 (sampling seed
 standard deviation divided by sqrt(n). Pass --seed-studies ESMM_STUDY
 KD_TAU_STUDY to override the summary directories, or --single-seed to
 reproduce the seed-42 plot without error bars and without the _seeds suffix.
+Pass --summary PATH to plot the verified combined ten-seed manuscript report.
 """
 import argparse
 import csv
@@ -103,6 +104,49 @@ def load_seed_records(studies):
     return records
 
 
+def load_summary_records(path):
+    """Read the downsampled arms of the verified ten-seed manuscript report."""
+    data = json.loads(path.read_text())
+    seeds = list(range(42, 52))
+    records = []
+    for variant, (model, _, _, selection) in zip(("down_esmm", "down_kd_tau"), RUNS):
+        sources = [row for row in data["sources"] if row["variant"] == variant]
+        if len(sources) != 10 or sorted(row["seed"] for row in sources) != seeds:
+            raise ValueError(f"{variant}: expected exactly one source for each seed 42–51")
+        if any(row["selected_on"].get("metric") != selection
+               or row["selected_on"].get("split") != "val" for row in sources):
+            raise ValueError(f"{variant}: unexpected checkpoint selection rule")
+        for population, _ in POPS:
+            for metric, _ in METRICS:
+                rows = [row for row in data["summary"] if row["variant"] == variant
+                        and row["population"] == population and row["metric"] == metric]
+                if len(rows) != 1:
+                    raise ValueError(f"{variant}/{population}/{metric}: expected one summary row")
+                row = rows[0]
+                values = np.asarray(row["values"], dtype=float)
+                if (row["n"] != 10 or values.shape != (10,)
+                        or not np.isfinite(values).all()
+                        or not np.isfinite([row["mean"], row["sem"]]).all()
+                        or not np.isclose(row["mean"], values.mean(), rtol=1e-12, atol=1e-15)
+                        or not np.isclose(row["sem"], values.std(ddof=1) / np.sqrt(10),
+                                          rtol=1e-12, atol=1e-15)):
+                    raise ValueError(f"{variant}/{population}/{metric}: invalid ten-seed mean or SEM")
+                records.append(dict(model=model, population=population, metric=metric,
+                                    value=row["mean"], sem=row["sem"], n=10,
+                                    source=str(path)))
+    return records
+
+
+def comparison_title(records, single_seed=False):
+    if single_seed:
+        return "5% nonclick retention · single seed (42)"
+    counts = {row["n"] for row in records}
+    if len(counts) != 1:
+        raise ValueError("All plotted estimates must have the same seed count")
+    count = counts.pop()
+    return f"5% nonclick retention · mean ± SEM (seeds 42–{41 + count}, n = {count})"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group()
@@ -111,12 +155,16 @@ def main():
                         help="Study directories containing four-seed summaries, in model order")
     source.add_argument("--single-seed", action="store_true",
                         help="Reproduce the seed-42 plot without error bars")
+    source.add_argument("--summary", type=Path,
+                        help="Combined manuscript seed_summary.json with ten seeds per variant")
     args = parser.parse_args()
-    records = load_records() if args.single_seed else load_seed_records(args.seed_studies)
+    records = (load_records() if args.single_seed else
+               load_summary_records(args.summary) if args.summary else
+               load_seed_records(args.seed_studies))
     stem = STEM + "_seeds" if not args.single_seed else STEM
     OUT.mkdir(exist_ok=True)
     with (OUT / f"{stem}_data.csv").open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(records[0]))
+        writer = csv.DictWriter(stream, fieldnames=list(records[0]), lineterminator="\n")
         writer.writeheader()
         writer.writerows(records)
     lookup = {(r["model"], r["population"], r["metric"]): r["value"] for r in records}
@@ -159,11 +207,12 @@ def main():
     fig.legend([Patch(facecolor=r[2]) for r in RUNS], [r[0] for r in RUNS],
                loc="lower center", bbox_to_anchor=(.5, .005), ncol=2, frameon=False, fontsize=12)
     fig.subplots_adjust(left=.07, right=.98, top=.94, bottom=.19, wspace=.25)
-    title = ("5% nonclick retention · mean ± SEM (seeds 42–45, n = 4)"
-             if not args.single_seed else "5% nonclick retention · single seed (42)")
-    fig.suptitle(title, fontsize=13, y=1.02)
+    fig.suptitle(comparison_title(records, args.single_seed), fontsize=13, y=1.02)
     for ext in ("png", "pdf", "svg"):
         fig.savefig(OUT / f"{stem}.{ext}", dpi=220, bbox_inches="tight")
+        if ext == "svg":
+            path = OUT / f"{stem}.{ext}"
+            path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
     plt.close(fig)
     print(f"Wrote {OUT / stem} (PNG, PDF, SVG, CSV)")
 

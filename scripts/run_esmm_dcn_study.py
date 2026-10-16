@@ -1,4 +1,4 @@
-"""Prepare, optionally submit, and report a four-seed ESMM with DCN study.
+"""Prepare, optionally submit, and report a multi-seed ESMM with DCN study.
 
 The esmm_dcn model replaces only the ESMM CTR head, retaining its shared
 embeddings and training recipe.
@@ -28,6 +28,21 @@ SEEDS = (42, 43, 44, 45)
 POPULATIONS = ("CTR", "pCVR", "CTCVR", "CTCVR-logged")
 METRICS = ("auc", "pr_auc", "ne", "ce")
 MODEL = "esmm_dcn"
+
+
+def _validated_seeds(seeds):
+    seeds = tuple(seeds)
+    if (len(seeds) < 2 or any(type(seed) is not int or seed < 0 for seed in seeds)
+            or len(set(seeds)) != len(seeds)):
+        raise ValueError("study seeds must contain at least two unique nonnegative integers")
+    return seeds
+
+
+def _seed_description(seeds):
+    seeds = sorted(seeds)
+    if all(right == left + 1 for left, right in zip(seeds, seeds[1:])):
+        return f"{seeds[0]}–{seeds[-1]}"
+    return ", ".join(map(str, seeds))
 
 
 def _json(path, value, exclusive=False):
@@ -64,10 +79,11 @@ def _check_config(cfg):
 
 
 def prepare(study, config, logged_config, *, code=CODE, root=ROOT,
-            python=sys.executable, partition=None, cpus=4):
+            python=sys.executable, partition=None, cpus=4, seeds=SEEDS):
     """Write a new study without submitting jobs or touching the best-model file."""
     study, config, logged_config, code, root = map(
         lambda p: Path(p).resolve(), (study, config, logged_config, code, root))
+    seeds = _validated_seeds(seeds)
     cfg = yaml.safe_load(config.read_text())
     _check_config(cfg)
     variant = cfg["model"]
@@ -111,7 +127,7 @@ def prepare(study, config, logged_config, *, code=CODE, root=ROOT,
     shutil.copy2(config, configs / "base_train.yaml")
     shutil.copy2(logged_config, configs / "logged_eval.yaml")
     jobs = []
-    for seed in SEEDS:
+    for seed in seeds:
         arm = f"{variant}_seed{seed}"
         seed_config = configs / arm / "train.yaml"
         seed_config.parent.mkdir()
@@ -123,7 +139,7 @@ def prepare(study, config, logged_config, *, code=CODE, root=ROOT,
                      "run_record": str(study / f"run_seed{seed}.json")})
     manifest = {"model": variant, "variant": variant,
                 "project_root": str(root), "source_code": str(snapshot),
-                "python": str(Path(python).absolute()), "seeds": list(SEEDS),
+                "python": str(Path(python).absolute()), "seeds": list(seeds),
                 "epochs": 5, "batch_size": 65536, "checkpoint_metric": "ctcvr_ne",
                 "logged_config": str(configs / "logged_eval.yaml"),
                 "logged_config_sha256": _hash(configs / "logged_eval.yaml"),
@@ -141,12 +157,12 @@ def prepare(study, config, logged_config, *, code=CODE, root=ROOT,
     if partition:
         common.append(f"#SBATCH --partition={partition}")
     train_lines = [*common, f"#SBATCH --job-name={variant}",
-                   "#SBATCH --array=0-3%4", "#SBATCH --gres=gpu:1",
+                   f"#SBATCH --array=0-{len(jobs) - 1}%4", "#SBATCH --gres=gpu:1",
                    f"#SBATCH --output={study}/slurm_%A_%a.out",
                    f"#SBATCH --error={study}/slurm_%A_%a.err",
                    "set -euo pipefail", f"export OMP_NUM_THREADS={cpus} MKL_NUM_THREADS={cpus}",
-                   f"{interpreter} -u {script} --run-seed {location} "
-                   '"$((42 + SLURM_ARRAY_TASK_ID))"']
+                   f"{interpreter} -u {script} --run-index {location} "
+                   '"$SLURM_ARRAY_TASK_ID"']
     (study / "train.sbatch").write_text("\n".join(train_lines) + "\n")
     # Reporting is CPU-only; it must not request another accelerator.
     report_lines = [*common, f"#SBATCH --job-name={variant}_report",
@@ -231,8 +247,16 @@ def run_seed(study, seed):
     return Path(record["run_dir"])
 
 
+def run_index(study, index):
+    """Resolve an array task through the manifest, including continuation seeds."""
+    jobs = _manifest(study)["jobs"]
+    if not 0 <= index < len(jobs):
+        raise ValueError(f"array task index outside study jobs: {index}")
+    return run_seed(study, jobs[index]["seed"])
+
+
 def report(study):
-    """Validate four completed runs, then write per-seed metrics and mean ± SEM."""
+    """Validate every requested run, then write per-seed metrics and mean ± SEM."""
     sys.path.insert(0, str(CODE))
     from evaluation.reports import study_test_metrics
 
@@ -242,8 +266,9 @@ def report(study):
     variant = manifest.get("variant")
     if variant != MODEL or manifest.get("model") != MODEL:
         raise ValueError("study model and variant must identify esmm_dcn")
-    if sorted(job["seed"] for job in manifest["jobs"]) != list(SEEDS):
-        raise ValueError("study must contain exactly seeds 42–45")
+    seeds = _validated_seeds(manifest.get("seeds", SEEDS))
+    if sorted(job["seed"] for job in manifest["jobs"]) != sorted(seeds):
+        raise ValueError(f"study jobs must contain exactly manifest seeds {_seed_description(seeds)}")
     expected_logged = yaml.safe_load(Path(manifest["logged_config"]).read_text())
     teacher_name = expected_logged["pctr_model"]
     rows, sources, census = [], [], {}
@@ -321,8 +346,8 @@ def report(study):
         for metric in METRICS:
             values = [row[metric] for row in rows if row["population"] == pop]
             summary.append({"variant": variant, "population": pop,
-                            "metric": metric, "n": 4, "mean": statistics.mean(values),
-                            "sem": statistics.stdev(values) / math.sqrt(4), "values": values})
+                            "metric": metric, "n": len(seeds), "mean": statistics.mean(values),
+                            "sem": statistics.stdev(values) / math.sqrt(len(seeds)), "values": values})
     _json(study / "seed_summary.json", {"variant": variant, "sources": sources, "per_seed": rows,
                                         "teacher_identity": teacher_identity, "summary": summary})
     for name, data in (("per_seed.csv", rows), ("seed_summary.csv", summary)):
@@ -330,7 +355,8 @@ def report(study):
             writer = csv.DictWriter(stream, fieldnames=list(data[0]))
             writer.writeheader()
             writer.writerows(data)
-    lines = [f"{variant}: test mean ± SEM across seeds 42–45 (n=4), after five training epochs.",
+    lines = [f"{variant}: test mean ± SEM across seeds {_seed_description(seeds)} "
+             f"(n={len(seeds)}), after five training epochs.",
              "Each checkpoint minimizes validation native CTCVR (q*v) NE; test data never select checkpoints.",
              "pCVR uses clicked impressions; CTR, native CTCVR and logged CTCVR use all impressions.",
              "Logged CTCVR uses the same frozen DCN source across seeds; native CTCVR uses the jointly trained DCN.",
@@ -355,6 +381,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--run-seed", nargs=2, metavar=("STUDY_DIR", "SEED"))
+    action.add_argument("--run-index", nargs=2, metavar=("STUDY_DIR", "INDEX"))
     action.add_argument("--report-study", type=Path)
     parser.add_argument("--config", type=Path, default=CODE / "configs/esmm_dcn/train.yaml")
     parser.add_argument("--logged-config", type=Path,
@@ -363,9 +390,13 @@ def main(argv=None):
     parser.add_argument("--submit", action="store_true", help="submit the prepared GPU array and CPU report")
     parser.add_argument("--partition", help="Slurm partition; default uses the cluster default")
     parser.add_argument("--cpus", type=int, default=4)
+    parser.add_argument("--seeds", type=int, nargs="+", default=SEEDS,
+                        help="unique training seeds (default: 42 43 44 45)")
     args = parser.parse_args(argv)
     if args.run_seed:
         print(run_seed(Path(args.run_seed[0]), int(args.run_seed[1])))
+    elif args.run_index:
+        print(run_index(Path(args.run_index[0]), int(args.run_index[1])))
     elif args.report_study:
         print(report(args.report_study).read_text())
     else:
@@ -375,7 +406,8 @@ def main(argv=None):
         _check_config(cfg)
         study = args.study_dir or ROOT / f"artifacts/{cfg['model']}_studies" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         logged_config = args.logged_config or args.config.parent / "eval_dcn_matched_stats_wd3e6_seed42.yaml"
-        print(prepare(study, args.config, logged_config, partition=args.partition, cpus=args.cpus))
+        print(prepare(study, args.config, logged_config, partition=args.partition,
+                      cpus=args.cpus, seeds=args.seeds))
         if args.submit:
             print("Training and report job IDs:", *submit(study))
 

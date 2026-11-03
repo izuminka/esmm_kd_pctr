@@ -90,6 +90,26 @@ def test_config_default_and_model_guard():
         downsampling.from_config(cfg)
 
 
+def test_esmm_dcn_uses_the_same_retention_mask_as_esmm_and_kd_tau():
+    full = _FakeSplit(10000)
+    sampling = {"rate": .1, "seed": 2026}
+    retained_ids = []
+    for model in ("esmm", "esmm_dcn", "esmm_logged_pctr"):
+        cfg = {"model": model, "model_params": {"objective": "kd_tau"},
+               "data": {"nonclick_sampling": sampling}}
+        kept = downsampling.restrict(full, downsampling.from_config(cfg))
+        retained_ids.append(kept.sample_ids)
+        assert kept.ys.sum() == full.ys.sum()
+        assert kept.zs.sum() == full.zs.sum()
+        assert set(full.sample_ids[full.ys == 1].tolist()) <= set(kept.sample_ids.tolist())
+    assert all(torch.equal(ids, retained_ids[0]) for ids in retained_ids[1:])
+    # Unrelated models remain unsupported.
+    for model in ("unknown_model", "dcn", "esmm_direct_product"):
+        with pytest.raises(ValueError, match="plain ESMM"):
+            downsampling.from_config({"model": model,
+                                      "data": {"nonclick_sampling": sampling}})
+
+
 # Boundary cases and exact row selection
 
 
@@ -130,13 +150,19 @@ def test_full_rate_bypasses_all_inference_paths(tmp_path, monkeypatch, rate):
 
 
 @pytest.mark.parametrize("rate", [.05, .5, .999])
-@pytest.mark.parametrize("objective", [None, "kd_tau"])
+@pytest.mark.parametrize("objective", [None, "kd_tau", "esmm_dcn"])
 def test_recovery_applied_once_to_ctr_only(tmp_path, monkeypatch, rate, objective):
     cfg = tiny_cfg(tmp_path)
     cfg["evaluation"]["is_logged_ctcvr"] = False
     cfg["data"]["nonclick_sampling"] = {"rate": rate, "seed": 2026}
     cfg["training"]["batch_size"] = 8
-    if objective:
+    if objective == "esmm_dcn":
+        cfg["model"] = "esmm_dcn"
+        cfg["model_params"]["dcn_params"] = {
+            "emb_dim": 2, "cross_rank": 2, "num_cross_layers": 1,
+            "deep_hidden_dims": [4], "dropout": 0, "bag_stats": True,
+        }
+    elif objective:
         cfg["model"] = "esmm_logged_pctr"
         cfg["model_params"].update(objective=objective, alpha=.5, aux_weight=1.)
         cfg["training"]["checkpoint_metric"] = "logged_ctcvr_ne"
@@ -162,7 +188,7 @@ def test_recovery_applied_once_to_ctr_only(tmp_path, monkeypatch, rate, objectiv
         calls.clear()
         _, _, _, scores = trainer._predict_numpy(
             model, split, split_name=name, is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space[name])
-        if objective and name == "val":
+        if objective == "kd_tau" and name == "val":
             np.testing.assert_array_equal(scores["p"], split.logged_pctr.numpy())
         if name == "train":
             assert not calls
@@ -192,6 +218,34 @@ def test_recovery_applied_once_to_ctr_only(tmp_path, monkeypatch, rate, objectiv
     calls.clear()
     evaluator.evaluate_esmm(model, batch, y, z, is_logged_ctcvr=False, nonclick_rate=rate)
     assert len(calls) == 1
+
+
+def test_esmm_dcn_corrects_only_native_q_and_preserves_logged_factor_and_v(tmp_path):
+    from scripts.report_metrics import populations
+
+    cfg = tiny_cfg(tmp_path)
+    cfg["model"] = "esmm_dcn"
+    cfg["data"]["nonclick_sampling"] = {"rate": .05, "seed": 2026}
+    cfg["model_params"]["dcn_params"] = {
+        "emb_dim": 2, "cross_rank": 2, "num_cross_layers": 1,
+        "deep_hidden_dims": [4], "dropout": 0, "bag_stats": True,
+    }
+    split = TinySplit()
+    split.logged_pctr = torch.linspace(.1, .3, len(split))
+    model = build_model(cfg, {"f": 8}).eval()
+    batch, y, z = split.get_batch(torch.arange(len(split)))
+    with torch.no_grad():
+        raw_q, raw_v = model(batch)
+    _, _, _, scores = Trainer(cfg, str(tmp_path))._predict_numpy(
+        model, split, split_name="test", is_ctr_downsampled_space=False)
+    expected_q = torch.sigmoid(torch.logit(raw_q.double()) + math.log(.05)).float()
+    np.testing.assert_allclose(scores["q"], expected_q.numpy(), rtol=2e-6)
+    np.testing.assert_array_equal(scores["v"], raw_v.numpy())
+    np.testing.assert_array_equal(scores["p"], split.logged_pctr.numpy())
+    scored = populations("esmm_dcn", y.numpy(), z.numpy(), scores)
+    np.testing.assert_allclose(scored["CTCVR"][0], (expected_q * raw_v).numpy(), rtol=2e-6)
+    np.testing.assert_allclose(scored["CTCVR-logged"][0],
+                               (split.logged_pctr * raw_v).numpy(), rtol=1e-6)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])

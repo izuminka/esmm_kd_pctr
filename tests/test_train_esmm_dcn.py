@@ -19,6 +19,7 @@ from scripts.predict_encoded import build_model as restore_model
 from scripts.report_metrics import logged_ctcvr_splits
 from scripts.train import build_model, build_metric_fn, load_config
 from training import runs
+from training import downsampling
 from training.dataset import NumpyDataset
 from training.trainer import Trainer
 
@@ -107,10 +108,15 @@ def test_production_train_step_calls_existing_esmm_loss(tmp_path, monkeypatch):
     assert model.ctr_tower.head.weight.grad is not None
 
 
-def test_native_selection_training_and_checkpoint_keep_sharing(tmp_path):
+@pytest.mark.parametrize("nonclick_rate", [None, .05])
+def test_native_selection_training_and_checkpoint_keep_sharing(tmp_path, nonclick_rate):
     cfg = _config(tmp_path)
     split = TinySplit()
-    data = NumpyDataset(split, split, None, {"f": {str(i): i for i in range(1, 9)}}, ["f"])
+    train = split
+    if nonclick_rate is not None:
+        cfg["data"]["nonclick_sampling"] = {"rate": nonclick_rate, "seed": 2026}
+        train = downsampling.restrict(split, cfg["data"]["nonclick_sampling"])
+    data = NumpyDataset(train, split, None, {"f": {str(i): i for i in range(1, 9)}}, ["f"])
     model = build_model(cfg, data.vocab_sizes)
     metric_fn = build_metric_fn(cfg)
     batch, y, z = split.get_batch(torch.arange(8))
@@ -123,6 +129,7 @@ def test_native_selection_training_and_checkpoint_keep_sharing(tmp_path):
     assert checkpoint["model_type"] == "esmm_dcn"
     assert checkpoint["model_params"] == model.model_params
     assert "logged_pctr" not in checkpoint
+    assert checkpoint.get("nonclick_sampling") == cfg["data"].get("nonclick_sampling")
     history = list(csv.DictReader((tmp_path / "history.csv").open()))
     for row in history:
         assert float(row["val_score"]) == pytest.approx(float(row["val_ctcvr_ne"]), abs=1e-6)
@@ -132,6 +139,17 @@ def test_native_selection_training_and_checkpoint_keep_sharing(tmp_path):
     assert restored.ctr_tower.embeddings is restored.embeddings
     for actual, expected in zip(restored(batch), model(batch)):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    if nonclick_rate is not None:
+        # Saved sampling owns inference, even if today's configuration differs.
+        current_cfg = {**cfg, "data": {"nonclick_sampling": {"rate": .9, "seed": 1}}}
+        inference_cfg = {**current_cfg,
+                         "data": {"nonclick_sampling": checkpoint["nonclick_sampling"]}}
+        _, _, _, scores = Trainer(inference_cfg, str(tmp_path))._predict_numpy(
+            restored, split, split_name="test", is_ctr_downsampled_space=False)
+        raw_q, raw_v = restored(batch)
+        expected_q = nonclick_rate * raw_q / (1 - raw_q + nonclick_rate * raw_q)
+        np.testing.assert_allclose(scores["q"], expected_q.detach().numpy(), rtol=1e-6)
+        np.testing.assert_array_equal(scores["v"], raw_v.detach().numpy())
 
 
 def _run(script, *args):
@@ -140,7 +158,8 @@ def _run(script, *args):
                           env={**os.environ, "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2"})
 
 
-def test_real_data_cli_training_and_both_restore_paths(encoded, tmp_path):
+@pytest.mark.parametrize("nonclick_rate", [None, .05])
+def test_real_data_cli_training_and_both_restore_paths(encoded, tmp_path, nonclick_rate):
     encoded_dir, _, _ = encoded
     n_fields = len(json.loads((Path(encoded_dir) / "field_ids.json").read_text()))
     cfg = _config(tmp_path / "artifacts", n_fields)
@@ -149,6 +168,8 @@ def test_real_data_cli_training_and_both_restore_paths(encoded, tmp_path):
     cfg["training"].update(epochs=1, batch_size=64, eval_batch_size=128,
                            checkpoint_metric="ctcvr_prauc")
     cfg["data"] = {"encoded_dir": encoded_dir}
+    if nonclick_rate is not None:
+        cfg["data"]["nonclick_sampling"] = {"rate": nonclick_rate, "seed": 2026}
     config_path = tmp_path / "esmm_dcn.yaml"
     config_path.write_text(yaml.safe_dump(cfg))
     done = _run("train.py", "--config", config_path, "--best-models", tmp_path / "best.yaml")
@@ -156,9 +177,15 @@ def test_real_data_cli_training_and_both_restore_paths(encoded, tmp_path):
     run = Path(runs.resolve_run(str(tmp_path / "artifacts"), "esmm_dcn"))
     assert json.loads((run / "run.json").read_text())["status"] == "FINISHED"
     assert not (run / "metrics/test.json").exists()
+    checkpoint = torch.load(run / "best.pt", weights_only=False)
+    assert checkpoint.get("nonclick_sampling") == cfg["data"].get("nonclick_sampling")
     stale = yaml.safe_load((run / "config.yaml").read_text())
     stale["model_params"]["tower_dims"] = [999, 7, 2]
     (run / "config.yaml").write_text(yaml.safe_dump(stale))
+    if nonclick_rate is not None:
+        # Caller settings may evolve; inference must use the checkpoint's rate.
+        cfg["data"]["nonclick_sampling"] = {"rate": .9, "seed": 1}
+        config_path.write_text(yaml.safe_dump(cfg))
     exported = tmp_path / "restored.parquet"
     done = _run("predict_encoded.py", "--config", config_path, "--run-dir", run,
                 "--split", "test", "--out", exported)

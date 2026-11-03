@@ -28,6 +28,12 @@ SEEDS = (42, 43, 44, 45)
 POPULATIONS = ("CTR", "pCVR", "CTCVR", "CTCVR-logged")
 METRICS = ("auc", "pr_auc", "ne", "ce")
 MODEL = "esmm_dcn"
+DOWNSAMPLED_VARIANT = "esmm_dcn_retention_5pct"
+NONCLICK_SAMPLING = {"rate": 0.05, "seed": 2026}
+
+
+def _variant(cfg):
+    return DOWNSAMPLED_VARIANT if cfg["data"].get("nonclick_sampling") is not None else MODEL
 
 
 def _validated_seeds(seeds):
@@ -73,9 +79,13 @@ def _check_config(cfg):
     if "dcn_optimizer" in training:
         raise ValueError("esmm_dcn retains the ESMM optimizer; dcn_optimizer is not supported")
     if (training.get("early_stopping", {}).get("enabled", True)
-            or "logged_pctr" in cfg or "train_cohort" in cfg["data"]
-            or "nonclick_sampling" in cfg["data"]):
-        raise ValueError("study requires full-population training without early stopping or logged pCTR")
+            or "logged_pctr" in cfg or "train_cohort" in cfg["data"]):
+        raise ValueError("study requires no early stopping, train cohort, or logged pCTR training inputs")
+    sampling = cfg["data"].get("nonclick_sampling")
+    if sampling is not None and (sampling != NONCLICK_SAMPLING
+                                  or training["out_dir"] != "artifacts_downsampled"):
+        raise ValueError("downsampled study requires nonclick rate 0.05, sampling seed 2026, "
+                         "and out_dir artifacts_downsampled")
 
 
 def prepare(study, config, logged_config, *, code=CODE, root=ROOT,
@@ -86,7 +96,7 @@ def prepare(study, config, logged_config, *, code=CODE, root=ROOT,
     seeds = _validated_seeds(seeds)
     cfg = yaml.safe_load(config.read_text())
     _check_config(cfg)
-    variant = cfg["model"]
+    variant = _variant(cfg)
     logged = yaml.safe_load(logged_config.read_text())
     if (set(logged) != {"pctr_model", "logged_pctr"}
             or set(logged["logged_pctr"]["predictions"]) != {"test"}):
@@ -137,7 +147,7 @@ def prepare(study, config, logged_config, *, code=CODE, root=ROOT,
                      "config_sha256": _hash(seed_config),
                      "registry": str(study / f"best_models_seed{seed}.yaml"),
                      "run_record": str(study / f"run_seed{seed}.json")})
-    manifest = {"model": variant, "variant": variant,
+    manifest = {"model": MODEL, "variant": variant,
                 "project_root": str(root), "source_code": str(snapshot),
                 "python": str(Path(python).absolute()), "seeds": list(seeds),
                 "epochs": 5, "batch_size": 65536, "checkpoint_metric": "ctcvr_ne",
@@ -147,6 +157,8 @@ def prepare(study, config, logged_config, *, code=CODE, root=ROOT,
                 "code_status": _git(code, "status", "--porcelain"),
                 "untracked": sorted(set(untracked) - {""}), "source_sha256": hashes,
                 "jobs": jobs}
+    if cfg["data"].get("nonclick_sampling") is not None:
+        manifest["nonclick_sampling"] = dict(cfg["data"]["nonclick_sampling"])
     _json(study / "submission.json", manifest, exclusive=True)
     interpreter = shlex.quote(manifest["python"])
     script = shlex.quote(str(snapshot / "scripts" / Path(__file__).name))
@@ -264,7 +276,7 @@ def report(study):
     manifest = _manifest(study)
     _verify_inputs(manifest)
     variant = manifest.get("variant")
-    if variant != MODEL or manifest.get("model") != MODEL:
+    if variant not in (MODEL, DOWNSAMPLED_VARIANT) or manifest.get("model") != MODEL:
         raise ValueError("study model and variant must identify esmm_dcn")
     seeds = _validated_seeds(manifest.get("seeds", SEEDS))
     if sorted(job["seed"] for job in manifest["jobs"]) != sorted(seeds):
@@ -272,7 +284,7 @@ def report(study):
     expected_logged = yaml.safe_load(Path(manifest["logged_config"]).read_text())
     teacher_name = expected_logged["pctr_model"]
     rows, sources, census = [], [], {}
-    reference_config, teacher_identity = None, None
+    reference_config, teacher_identity, retained_cohort = None, None, None
     for job in sorted(manifest["jobs"], key=lambda j: j["seed"]):
         record = json.loads(Path(job["run_record"]).read_text())
         if record["seed"] != job["seed"] or record["arm"] != job["arm"]:
@@ -284,8 +296,10 @@ def report(study):
         if cfg != yaml.safe_load(Path(job["config"]).read_text()):
             raise ValueError(f"run config differs from study: {run_dir}")
         _check_config(cfg)
-        if cfg["model"] != variant or job["arm"] != f"{variant}_seed{job['seed']}":
+        if _variant(cfg) != variant or job["arm"] != f"{variant}_seed{job['seed']}":
             raise ValueError("run model or arm differs from study variant")
+        if cfg["data"].get("nonclick_sampling") != manifest.get("nonclick_sampling"):
+            raise ValueError("run sampling differs from study protocol")
         if cfg["training"].pop("seed") != job["seed"]:
             raise ValueError(f"run seed differs from manifest: {run_dir}")
         if reference_config is not None and cfg != reference_config:
@@ -294,6 +308,20 @@ def report(study):
         run = json.loads((run_dir / "run.json").read_text())
         if run["status"] != "FINISHED":
             raise ValueError(f"run is {run['status']}: {run_dir}")
+        if variant == DOWNSAMPLED_VARIANT:
+            sampling = run.get("nonclick_sampling", {})
+            original = run["data"]["train"]
+            if ({key: sampling.get(key) for key in NONCLICK_SAMPLING} != NONCLICK_SAMPLING
+                    or sampling.get("original_rows") != original["n_rows"]
+                    or sampling.get("n_clicks") != original["n_clicks"]
+                    or sampling.get("n_conversions") != original["n_conversions"]):
+                raise ValueError("retained training cohort does not preserve the sampling protocol")
+            cohort = {key: sampling[key] for key in
+                      ("rate", "seed", "n_rows", "n_clicks", "n_conversions", "original_rows")}
+            cohort["sample_ids_sha256"] = _hash(run_dir / sampling["sample_ids_file"])
+            if retained_cohort is not None and cohort != retained_cohort:
+                raise ValueError("retained training cohort differs across seeds")
+            retained_cohort = cohort
         with (run_dir / "history.csv").open(newline="") as stream:
             history = list(csv.DictReader(stream))
         if [int(r["epoch"]) for r in history] != list(range(1, 6)):
@@ -348,8 +376,12 @@ def report(study):
             summary.append({"variant": variant, "population": pop,
                             "metric": metric, "n": len(seeds), "mean": statistics.mean(values),
                             "sem": statistics.stdev(values) / math.sqrt(len(seeds)), "values": values})
-    _json(study / "seed_summary.json", {"variant": variant, "sources": sources, "per_seed": rows,
-                                        "teacher_identity": teacher_identity, "summary": summary})
+    result = {"variant": variant, "sources": sources, "per_seed": rows,
+              "teacher_identity": teacher_identity, "summary": summary}
+    if retained_cohort is not None:
+        result["retained_train_cohort"] = retained_cohort
+        result["ctr_recovery"] = "q_full = 0.05*q_R / (1-q_R + 0.05*q_R); native CTCVR = q_full*v"
+    _json(study / "seed_summary.json", result)
     for name, data in (("per_seed.csv", rows), ("seed_summary.csv", summary)):
         with (study / name).open("w", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=list(data[0]))
@@ -363,6 +395,10 @@ def report(study):
              "SEM describes training-seed variability on a fixed test split.", "",
              "| Population | AUC | PR-AUC | NE | CE |",
              "| --- | ---: | ---: | ---: | ---: |"]
+    if variant == DOWNSAMPLED_VARIANT:
+        lines[1:1] = ["Training retains every click and 5% of nonclicks with fixed sampling seed 2026.",
+                      "Validation/test CTR is q_full = 0.05*q_R / (1-q_R + 0.05*q_R); "
+                      "native CTCVR is q_full*v, and pCVR v is unchanged."]
     for pop in POPULATIONS:
         cells = []
         for metric in METRICS:
@@ -404,7 +440,7 @@ def main(argv=None):
             parser.error("--cpus must be positive")
         cfg = yaml.safe_load(args.config.read_text())
         _check_config(cfg)
-        study = args.study_dir or ROOT / f"artifacts/{cfg['model']}_studies" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        study = args.study_dir or ROOT / cfg["training"]["out_dir"] / f"{cfg['model']}_studies" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         logged_config = args.logged_config or args.config.parent / "eval_dcn_matched_stats_wd3e6_seed42.yaml"
         print(prepare(study, args.config, logged_config, partition=args.partition,
                       cpus=args.cpus, seeds=args.seeds))

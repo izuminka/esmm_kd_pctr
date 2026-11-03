@@ -5,7 +5,7 @@ Run from project root:
 
 The data-loading and validation routines come from
 ``plot_downsampled_esmm_comparison.py``. This script changes only the output
-names and layout: pCVR is stacked above logged CTCVR, matching Figure 1.
+names and layout: pCVR is stacked above serving pCTCVR.
 """
 import argparse
 import csv
@@ -55,6 +55,10 @@ def main():
         type=Path,
         help="Combined manuscript seed_summary.json with ten seeds per variant",
     )
+    parser.add_argument(
+        "--output-dir", type=Path, default=OUT,
+        help="Directory for the PDF, PNG, SVG and plotted data CSV",
+    )
     args = parser.parse_args()
 
     records = (
@@ -65,8 +69,9 @@ def main():
         else load_seed_records(args.seed_studies)
     )
     stem = STEM + "_single_seed" if args.single_seed else STEM
-    OUT.mkdir(exist_ok=True)
-    with (OUT / f"{stem}_data.csv").open("w", newline="") as stream:
+    output = args.output_dir
+    output.mkdir(parents=True, exist_ok=True)
+    with (output / f"{stem}_data.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(records[0]), lineterminator="\n")
         writer.writeheader()
         writer.writerows(records)
@@ -91,7 +96,7 @@ def main():
 
     fig, axes = plt.subplots(2, 1, figsize=(7.2, 10.4))
     for ax, (population, _), title in zip(
-        axes.flat, POPS, ("a) CVR", "b) Logged CTCVR (p × v)")
+        axes.flat, POPS, ("(a) pCVR", "(b) Serving pCTCVR (p × v)")
     ):
         ax.set_axis_off()
         ax.text(
@@ -152,7 +157,7 @@ def main():
 
     fig.legend(
         [Patch(facecolor=run[2]) for run in RUNS],
-        [run[0] for run in RUNS],
+        ["ESMM", r"KD$_{\tau}$–0.5"],
         loc="lower center",
         bbox_to_anchor=(0.5, 0.005),
         ncol=len(RUNS),
@@ -162,18 +167,20 @@ def main():
     fig.subplots_adjust(
         left=0.07, right=0.98, top=0.99, bottom=0.10, hspace=0.24
     )
-    fig.suptitle(comparison_title(records, args.single_seed), fontsize=13, y=1.06)
+    title = (comparison_title(records, True) if args.single_seed else
+             f"5% nonclick retention · mean ± SEM ({records[0]['n']} seeds)")
+    fig.suptitle(title, fontsize=13, y=1.06)
     for extension in ("png", "pdf", "svg"):
         fig.savefig(
-            OUT / f"{stem}.{extension}",
+            output / f"{stem}.{extension}",
             dpi=220,
             bbox_inches="tight",
         )
         if extension == "svg":
-            path = OUT / f"{stem}.{extension}"
+            path = output / f"{stem}.{extension}"
             path.write_text("\n".join(line.rstrip() for line in path.read_text().splitlines()) + "\n")
     plt.close(fig)
-    print(f"Wrote {OUT / stem} (PNG, PDF, SVG, CSV)")
+    print(f"Wrote {output / stem} (PNG, PDF, SVG, CSV)")
 
 
 if __name__ == "__main__":

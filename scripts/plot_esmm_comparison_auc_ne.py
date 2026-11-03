@@ -1,4 +1,4 @@
-"""Create side-by-side full-population CVR and CTCVR panels with AUC and NE.
+"""Create side-by-side pCVR and pCTCVR panels with PR-AUC, AUC, and NE.
 
 Copied from plot_esmm_comparison_acm_format.py; preserves its source data,
 colors, error bars, axis limits, and grid styling; sizes for one column.
@@ -18,7 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Patch
-from matplotlib.ticker import MaxNLocator, ScalarFormatter
+from matplotlib.ticker import FuncFormatter, MaxNLocator, ScalarFormatter
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "paper/main/figures"
@@ -26,8 +26,9 @@ MODELS = [
     ("ESMM", "esmm", "#0072B2"),
     ("KD–0.5", "kd05", "#CC79A7"),
 ]
-POPS = [("pCVR", "pCVR"), ("CTCVR-logged", "Logged CTCVR\n(p × v)")]
+POPS = [("pCVR", "pCVR"), ("CTCVR-logged", "Logged pCTCVR\n(p × v)")]
 METRICS = [
+    ("pr_auc", "PR-AUC ↑"),
     ("auc", "AUC ↑"),
     ("ne", "NE ↓"),
 ]
@@ -87,12 +88,12 @@ def main():
     )
 
     # Lay out at the final printed size so tick labels have real space.
-    fig = plt.figure(figsize=(3.45, 1.45))
-    positions = (0.085, 0.33, 0.585, 0.84)
+    fig = plt.figure(figsize=(3.45, 1.55))
+    positions = (0.075, 0.235, 0.395, 0.585, 0.745, 0.905)
     for k, (pop, metric, title) in enumerate(
         (pop, metric, title) for pop, _ in POPS for metric, title in METRICS
     ):
-        ax = fig.add_axes([positions[k], 0.36, 0.14, 0.48])
+        ax = fig.add_axes([positions[k], 0.34, 0.085, 0.48])
         means, sems = np.array(
             [lookup[model, pop, metric] for model, _, _ in MODELS]
         ).T
@@ -108,9 +109,19 @@ def main():
         if metric == "ne" and low - pad <= 1 <= high + pad:
             ax.axhline(1, color="#555555", linestyle="--", linewidth=0.5)
         ax.set_xticks([])
-        ax.set_title(title, fontsize=6.5, pad=4)
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=3))
+        ax.set_title(title, fontsize=6.5, y=1.17, pad=0)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=3, steps=[1, 2, 3, 4, 5, 10]))
         ax.yaxis.set_major_formatter(ScalarFormatter(useOffset=False))
+        if metric == "pr_auc":
+            # Scale tick labels only; bars, error bars, and exported data stay raw.
+            if pop == "pCVR":
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value * 100:.2f}"))
+                scale_label = "×10⁻²"
+            else:
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value * 10000:.1f}"))
+                scale_label = "×10⁻⁴"
+            ax.text(0.5, 1.035, scale_label, transform=ax.transAxes,
+                    ha="center", va="bottom", fontsize=5.5)
         ax.tick_params(axis="y", labelsize=5.5, pad=1.5, length=2, width=0.5)
         for spine in ax.spines.values():
             spine.set_linewidth(0.5)
@@ -121,7 +132,7 @@ def main():
             color="#333333", linewidth=0.5, clip_on=False,
         )
 
-    for x, title in ((0.28, "(a) CVR"), (0.78, "(b) CTCVR (p × v)")):
+    for x, title in ((0.25, "(a) pCVR"), (0.76, "(b) pCTCVR (p × v)")):
         fig.text(x, 0.24, title, ha="center", va="center",
                  fontsize=6.5, fontweight="bold")
     fig.legend(

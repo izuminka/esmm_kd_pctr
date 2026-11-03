@@ -130,6 +130,21 @@ fixed teacher. It writes per-seed values, means, and SEMs (sample standard
 deviation divided by sqrt(10)), plus both manuscript tables. An incomplete
 study cannot produce a new aggregate.
 
+The direct-product baseline has a separate ten-seed study. It trains only
+the conversion tower through `BCE(z, stopgrad(p) * v)`, using the same frozen
+teacher and five-epoch budget. The original four runs are pinned; missing
+seeds use the same GPU prediction and CPU scoring phases:
+
+```bash
+code/.venv/bin/python code/scripts/run_direct_product_study.py --prepare artifacts/direct_product_studies/NEW_STUDY
+code/.venv/bin/python code/scripts/run_direct_product_study.py --submit artifacts/direct_product_studies/NEW_STUDY
+code/.venv/bin/python code/scripts/report_direct_product_ten_seeds.py --study-dir artifacts/direct_product_studies/NEW_STUDY
+```
+
+DIRECT reports pCVR and serving CTCVR only because it has no auxiliary pCTR
+tower. The report requires all ten seeds, the fixed teacher's train/validation/
+test score hashes, and matching checkpoint and prediction provenance.
+
 ## Status
 
 Built so far: data pipeline, ESMM, DCN-V2, evaluation metrics, and

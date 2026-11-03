@@ -209,12 +209,21 @@ def finished(prepared):
 def finish_study(study, root):
     manifest = study_cli._manifest(study)
     for job in manifest["jobs"]:
-        run = root / "artifacts" / job["arm"] / "r1"
+        cfg = yaml.safe_load(Path(job["config"]).read_text())
+        run = root / cfg["training"]["out_dir"] / job["arm"] / "r1"
         (run / "metrics").mkdir(parents=True)
         (run / "config.yaml").write_text(Path(job["config"]).read_text())
         (run / "best.pt").write_bytes(b"checkpoint")
         write_json(run / "run.json", {"status": "FINISHED", "selected_on": {
             "metric": "ctcvr_ne", "split": "val", "epoch": 2, "value": .8}})
+        if "nonclick_sampling" in cfg["data"]:
+            data = json.loads((run / "run.json").read_text())
+            data["data"] = {"train": {"n_rows": 100, "n_clicks": 20, "n_conversions": 3}}
+            data["nonclick_sampling"] = {**cfg["data"]["nonclick_sampling"],
+                "n_rows": 24, "n_clicks": 20, "n_conversions": 3, "original_rows": 100,
+                "sample_ids_file": "retained_sample_ids.npy"}
+            write_json(run / "run.json", data)
+            (run / "retained_sample_ids.npy").write_bytes(b"same fixed retained cohort")
         (run / "history.csv").write_text(
             "epoch,val_score,val_ctcvr_ne\n1,1.2,1.2\n2,.8,.8\n3,.8,.8\n4,.9,.9\n5,1.1,1.1\n")
         rows = [{"split": "test", "population": pop, "rows": 20 if pop == "pCVR" else 100,
@@ -234,6 +243,76 @@ def finish_study(study, root):
                                               "run_dir": str(run),
                                               "config_sha256": study_cli._hash(run / "config.yaml")})
     return study, root, manifest
+
+
+def downsampled_study(prepared, seeds=tuple(range(42, 52))):
+    full_study, root, code = prepared
+    cfg = yaml.safe_load((full_study / "configs/base_train.yaml").read_text())
+    cfg["data"]["nonclick_sampling"] = {"rate": .05, "seed": 2026}
+    cfg["training"]["out_dir"] = "artifacts_downsampled"
+    config = root / "downsampled.yaml"
+    config.write_text(yaml.safe_dump(cfg))
+    study = study_cli.prepare(root / "downsampled", config,
+                             study_cli._manifest(full_study)["logged_config"],
+                             code=code, root=root, seeds=seeds)
+    return study, root, code
+
+
+def test_downsampled_study_has_distinct_arms_and_fixed_sampling(prepared):
+    study, _, _ = downsampled_study(prepared)
+    manifest = study_cli._manifest(study)
+    assert manifest["model"] == "esmm_dcn"
+    assert manifest["variant"] == "esmm_dcn_retention_5pct"
+    assert manifest["nonclick_sampling"] == {"rate": .05, "seed": 2026}
+    assert len(manifest["jobs"]) == 10
+    assert "--array=0-9%4" in (study / "train.sbatch").read_text()
+    for job in manifest["jobs"]:
+        assert job["arm"] == f"esmm_dcn_retention_5pct_seed{job['seed']}"
+        cfg = yaml.safe_load(Path(job["config"]).read_text())
+        assert cfg["training"]["out_dir"] == "artifacts_downsampled"
+        assert cfg["data"]["nonclick_sampling"] == {"rate": .05, "seed": 2026}
+        assert "logged_pctr" not in cfg
+
+
+def test_downsampled_cli_selects_downsampled_study_root(prepared, monkeypatch):
+    study, root, _ = downsampled_study(prepared)
+    calls = []
+    monkeypatch.setattr(study_cli, "ROOT", root)
+    monkeypatch.setattr(study_cli, "prepare", lambda *args, **kwargs: calls.append(args) or args[0])
+    study_cli.main(["--config", str(study / "configs/base_train.yaml")])
+    assert calls[0][0].parent == root / "artifacts_downsampled/esmm_dcn_studies"
+
+
+@pytest.mark.parametrize("field,value", [("rate", .5), ("seed", 42)])
+def test_downsampled_recipe_rejects_unmatched_sampling(prepared, field, value):
+    study, _, _ = downsampled_study(prepared)
+    cfg = yaml.safe_load((study / "configs/base_train.yaml").read_text())
+    cfg["data"]["nonclick_sampling"][field] = value
+    with pytest.raises(ValueError, match="nonclick rate 0.05, sampling seed 2026"):
+        study_cli._check_config(cfg)
+
+
+def test_downsampled_ten_seed_report_explains_full_population_ctr_recovery(prepared):
+    study, root, _ = downsampled_study(prepared)
+    finish_study(study, root)
+    path = study_cli.report(study)
+    result = json.loads((study / "seed_summary.json").read_text())
+    assert result["variant"] == "esmm_dcn_retention_5pct"
+    assert result["retained_train_cohort"]["n_rows"] == 24
+    assert result["retained_train_cohort"]["seed"] == 2026
+    assert all(row["n"] == 10 for row in result["summary"])
+    assert "q_full = 0.05*q_R / (1-q_R + 0.05*q_R)" in path.read_text()
+    assert "native CTCVR is q_full*v" in path.read_text()
+
+
+def test_downsampled_report_rejects_different_retained_rows_across_seeds(prepared):
+    study, root, _ = downsampled_study(prepared)
+    _, _, manifest = finish_study(study, root)
+    run = Path(json.loads(Path(manifest["jobs"][1]["run_record"]).read_text())["run_dir"])
+    (run / "retained_sample_ids.npy").write_bytes(b"different cohort")
+    with pytest.raises(ValueError, match="retained training cohort differs"):
+        study_cli.report(study)
+    assert not (study / "seed_summary.json").exists()
 
 
 def test_ten_seed_report_requires_every_requested_seed_and_computes_sem(prepared):

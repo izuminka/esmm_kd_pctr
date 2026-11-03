@@ -1,0 +1,49 @@
+# Canonical 5% nonclick-retention ESMM recipe with only its CTR head replaced by DCN.
+# Validation/test recover q_full = .05*q_R / (1-q_R + .05*q_R); pCVR is unchanged.
+# The native product is q_full*v; frozen pCTR is test-only in the sibling eval config.
+model: esmm_dcn
+training:
+  evaluate_test: false
+  epochs: 5
+  batch_size: 65536
+  eval_batch_size: 65536
+  lr: 0.001
+  grad_clip_norm: 0
+  seed: 42
+  shuffle_block_size: 1
+  checkpoint_metric: ctcvr_ne
+  keep_checkpoint: best
+  save_predictions: false
+  gpus: 1
+  load_test: false
+  out_dir: artifacts_downsampled
+  early_stopping:
+    enabled: false
+    patience: 2
+    min_delta: 0.0
+model_params:
+  emb_dim: 20
+  tower_dims:
+  - 460
+  - 360
+  - 200
+  - 80
+  - 2
+  aux_weight: 1.0
+  dcn_params:
+    emb_dim: 20
+    cross_rank: 128
+    num_cross_layers: 4
+    deep_hidden_dims:
+    - 512
+    - 256
+    - 128
+    dropout: 0.1
+    pooling: mean
+    bag_stats: true
+data:
+  csv_dir: ali-ccp/extracted
+  encoded_dir: ali-ccp/encoded
+  nonclick_sampling:
+    rate: 0.05
+    seed: 2026

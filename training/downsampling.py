@@ -36,10 +36,11 @@ def from_config(cfg):
     spec = cfg.get("data", {}).get(NONCLICK_SAMPLING_KEY)
     if spec is None:
         return None
-    if cfg["model"] != "esmm" and not (
+    if cfg["model"] not in ("esmm", "esmm_dcn") and not (
             cfg["model"] == "esmm_logged_pctr"
             and cfg.get("model_params", {}).get("objective") == "kd_tau"):
-        raise ValueError("nonclick_sampling supports plain ESMM or logged ESMM with objective kd_tau only")
+        raise ValueError("nonclick_sampling supports plain ESMM (including its DCN CTR tower) "
+                         "or logged ESMM with objective kd_tau only")
     return _validate_spec(spec)
 
 

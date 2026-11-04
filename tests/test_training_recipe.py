@@ -1,5 +1,6 @@
-"""Base-rate output starts and the training-rate check."""
+"""Base-rate output starts, the training-rate check, and stratified batches."""
 
+import numpy as np
 import pytest
 import torch
 
@@ -11,6 +12,7 @@ from models.esmm_logged_pctr import LoggedPctrESMM
 from models.output_bias import log_odds, validate_output_bias_init
 from scripts.predict_encoded import build_model as restore_model
 from scripts.train import check_output_bias_init, training_base_rates
+from training.trainer import Trainer
 from test_esmm_protocol import tiny_cfg
 
 START = {"ctr": 0.04, "cvr": 0.005}
@@ -105,3 +107,35 @@ def test_checkpoint_params_carry_the_start(tmp_path):
                                                 "aux_weight": 1.0, "output_bias_init": START})
     restored.load_state_dict(model.state_dict())
     assert restored.output_bias_init == START
+
+
+# --- stratified batches ---
+
+
+def _trainer(tmp_path, **training):
+    cfg = tiny_cfg(tmp_path)
+    cfg["training"].update(training)
+    return Trainer(cfg, str(tmp_path))
+
+
+def test_stratified_order_is_a_permutation_with_proportional_batches(tmp_path):
+    rng = np.random.default_rng(0)
+    n, batch = 20_000, 1_000
+    ys = (rng.random(n) < 0.2).astype(np.int8)
+    zs = (ys & (rng.random(n) < 0.05)).astype(np.int8)
+    rows = _Rows(ys, zs)
+    trainer = _trainer(tmp_path, stratify_batches=True)
+    order = trainer._stratified_order(rows, 0)
+    assert torch.equal(torch.sort(order).values, torch.arange(n))
+    expected = zs.sum() * batch / n
+    counts = [int(rows.zs[order[s:s + batch]].sum()) for s in range(0, n, batch)]
+    assert max(abs(c - expected) for c in counts) <= 2
+    clicks = [int(rows.ys[order[s:s + batch]].sum()) for s in range(0, n, batch)]
+    assert max(abs(c - ys.sum() * batch / n) for c in clicks) <= 2
+    assert torch.equal(order, trainer._stratified_order(rows, 0))
+    assert not torch.equal(order, trainer._stratified_order(rows, 1))
+
+
+def test_stratification_needs_row_order(tmp_path):
+    with pytest.raises(ValueError, match="shuffle_block_size"):
+        _trainer(tmp_path, stratify_batches=True, shuffle_block_size=8)

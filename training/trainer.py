@@ -147,6 +147,11 @@ class Trainer:
         self.seed = tr.get("seed", 42)
         self.grad_clip_norm = tr["grad_clip_norm"]
         self.shuffle_block_size = tr["shuffle_block_size"]
+        # Spread each label stratum evenly over every epoch, so each batch holds
+        # nonclicks, clicks and conversions in proportion; see _stratified_order.
+        self.stratify_batches = tr.get("stratify_batches", False)
+        if self.stratify_batches and self.shuffle_block_size > 1:
+            raise ValueError("stratify_batches orders single rows; set shuffle_block_size to 1")
         # Which validation metric ranks checkpoints. It is a property of the arm,
         # not of the architecture: the recipe selects the click-only model on its
         # CTR head and ESMM on its native product.
@@ -234,6 +239,8 @@ class Trainer:
             raise ValueError("nonclick sampling training requires the encoded dataset pipeline")
         if self.is_cnn_attention and not use_numpy:
             raise ValueError("cnn_attention requires the encoded NumpyDataset pipeline")
+        if self.stratify_batches and not use_numpy:
+            raise ValueError("stratify_batches requires the encoded dataset pipeline")
 
         needed = set(self.logged_ctcvr_splits)
         if self.uses_logged_pctr_for_training:
@@ -493,11 +500,34 @@ class Trainer:
         idx = idx.flatten()
         return idx[idx < n]  # trailing block is short unless n divides evenly
 
+    def _stratified_order(self, split_data, epoch: int) -> torch.Tensor:
+        """Row order for one epoch that spreads each label stratum evenly.
+
+        The strata are nonclicks, clicks without conversion, and conversions. Each
+        row is keyed by its shuffled rank within its stratum plus uniform jitter,
+        scaled to [0, 1); sorting the keys interleaves the strata in proportion, so
+        every contiguous batch holds close to its share of each, rare conversions
+        included. Seeded seed+epoch, like the unstratified order.
+        """
+        device = split_data.device
+        g = torch.Generator(device=device).manual_seed(self.seed + epoch)
+        stratum = split_data.ys.long() + split_data.zs.long()
+        key = torch.empty(len(stratum), dtype=torch.float64, device=device)
+        for s in range(3):
+            rows = torch.nonzero(stratum == s).squeeze(1)
+            if not len(rows):
+                continue
+            rows = rows[torch.randperm(len(rows), generator=g, device=device)]
+            jitter = torch.rand(len(rows), generator=g, device=device, dtype=torch.float64)
+            key[rows] = (torch.arange(len(rows), device=device, dtype=torch.float64) + jitter) / len(rows)
+        return torch.argsort(key)
+
     def _train_epoch_numpy(self, model, split_data, optimizer, epoch: int = 0) -> float:
-        """One epoch over a SplitData in block-shuffled order; mean batch loss."""
+        """One epoch over a SplitData in shuffled or stratified order; mean batch loss."""
         model.train()
         n = len(split_data)
-        indices = self._epoch_order(n, epoch, split_data.device)
+        indices = (self._stratified_order(split_data, epoch) if self.stratify_batches
+                   else self._epoch_order(n, epoch, split_data.device))
         total_loss, n_batches = 0.0, 0
 
         for start in range(0, n, self.batch_size):

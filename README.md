@@ -99,6 +99,56 @@ regenerates per-seed results and mean ± SEM from the exact recorded run paths.
 For a different prespecified seed set, add `--seeds 42 43 44 45 46 47 48 49 50 51`.
 Array tasks map to the seeds recorded in the study manifest.
 
+## Final tables (main.tex Tables 1 and 2)
+
+The final tables are regenerated under `artifacts_final/` (full population) and
+`artifacts_final_downsampled/` (5% nonclick retention) through Slurm:
+`scripts/run_final_study.py --spec studies/final.yaml submit teacher`, then
+`submit students <variant ids>`, then `report` and `tables`;
+`scripts/verify_final_study.py` recomputes every stored score from the saved
+predictions. Data, features, splits, architectures, optimizers and checkpoint
+rules are those of the earlier draft; two training changes apply to every
+model. The frozen DCN-V2 is retrained the same way, at the draft's seed 42; every
+KD, KD-tau and Direct student distills from it, and it is the serving factor p
+in both tables.
+
+- **Output heads start at their training base rates.** Each final bias is the
+  log-odds of P(click) = 0.03887418 and of P(conversion | click) = 0.0053562476
+  on the training rows (`model_params.output_bias_init`). Under 5% nonclick
+  retention the click start is the retained-set rate, 0.44697409; conversion
+  given a click is unchanged because every click is retained. `scripts/train.py`
+  refuses a start that does not match the training rows. With the heads at 0.5,
+  the pCVR head first collapses and then oscillates through much of the first
+  epoch, which left the selected checkpoints' calibration close to random and
+  the 5% runs above NE 1.
+- **Batches are stratified by label** (`training.stratify_batches`). Nonclicks,
+  clicks without conversion and conversions are each spread evenly over the
+  epoch, so every batch carries its share of the rare conversions (13-14 per
+  batch at full population, against 2-28 under plain shuffling).
+
+**Splits and seeds, against the literature.** The official Ali-CCP train/test
+files are a time split: "the first 1/2 data in the time sequence [is the]
+training set while the rest [is the] test set" (Ma et al., SIGIR 2018, ESMM,
+Sec. 3.1). Validation is a random 10% of the training file, as in AITM
+("We randomly take 10% of the train set as the validation set", Xi et al.,
+KDD 2021, Sec. 5.1) and ESCM2 (Wang et al., SIGIR 2022, Sec. 5.1.1); ours is
+deterministic by a hash of the sample id, giving the 38.07M / 4.23M / 43.02M
+split AITM reports. Ten seeds follow ESMM ("All experiments are repeated 10
+times", Sec. 3.1).
+
+**Unseen users at test time.** Because test is the later half, 149,979 of the
+295,787 test users (field 101) have no training impressions; they carry 32.9%
+of test impressions. This is the time split, not corrupted data: both files
+draw user ids from one dictionary with the same range, and these users have
+full profiles and long behavior histories, but fewer impressions (94 vs 197 per
+user). Their user id is unseen, so models fall back on the remaining user
+fields there; validation, whose users all appear in training, cannot see it.
+
+An AITM/ESCM2-style feature protocol (17 single-valued fields, tokens seen
+fewer than ten times mapped to a shared OOV embedding) was also tried and
+dropped: without the six multi-valued behavior-history fields, ranking was
+worse for every model and the 5% runs stayed above NE 1.
+
 ## Ten-seed manuscript results
 
 The combined study covers full-data ESMM, ESMM + DCN, KD at alpha 0, 0.3,

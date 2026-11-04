@@ -33,11 +33,14 @@ class ESMMDirectProduct(ESMM):
         field_vocab_sizes: dict[str, int],
         emb_dim: int = 20,
         tower_dims: tuple = _PAPER_TOWER_DIMS,
+        output_bias_init: dict | None = None,
     ):
+        if output_bias_init and "ctr" in output_bias_init:
+            raise ValueError("the direct product has no CTR head to start at a click rate")
         # Build in canonical ESMM order before dropping the CTR tower. Under a
         # shared seed, embeddings and the pCVR tower then start identically to
         # the ESMM and KD arms used for matched comparisons.
-        super().__init__(field_vocab_sizes, emb_dim, tower_dims)
+        super().__init__(field_vocab_sizes, emb_dim, tower_dims, output_bias_init=output_bias_init)
         self.ctr_tower = None
 
     def forward(

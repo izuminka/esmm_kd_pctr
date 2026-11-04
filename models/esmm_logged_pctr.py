@@ -33,6 +33,7 @@ class LoggedPctrESMM(ESMM):
         emb_dim: int = 20,
         tower_dims: tuple = _PAPER_TOWER_DIMS,
         nonclick_rate: float = DEFAULT_NONCLICK_RATE,
+        output_bias_init: dict | None = None,
     ):
         if objective not in OBJECTIVES:
             raise ValueError(f"objective must be one of {OBJECTIVES}, got {objective!r}")
@@ -51,7 +52,9 @@ class LoggedPctrESMM(ESMM):
             raise ValueError("objective kd_tau requires a nonclick retention rate strictly below 1; use kd for full-rate training")
         if objective != "kd_tau" and self.nonclick_rate < 1:
             raise ValueError("nonclick_rate below one requires objective kd_tau")
-        super().__init__(field_vocab_sizes, emb_dim, tower_dims)
+        if objective == "product" and output_bias_init and "ctr" in output_bias_init:
+            raise ValueError("objective 'product' has no CTR head to start at a click rate")
+        super().__init__(field_vocab_sizes, emb_dim, tower_dims, output_bias_init=output_bias_init)
         self.objective = objective
         self.alpha = alpha
         self.aux_weight = aux_weight

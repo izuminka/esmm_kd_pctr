@@ -12,6 +12,9 @@ aux_weight scales the whole CTR term and leaves the CTCVR term's weight at one;
 
 Paper defaults: emb_dim=20, tower_dims=(460, 360, 200, 80, 2), aux_weight=1.
 tower_dims[0] must equal num_fields * emb_dim.
+
+output_bias_init optionally starts each head at its training base rate instead
+of 0.5; see models/output_bias.py.
 """
 
 import math
@@ -20,9 +23,17 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from models.output_bias import log_odds, validate_output_bias_init
+
 EPS = 1e-7
 
 _PAPER_TOWER_DIMS = (460, 360, 200, 80, 2)
+
+
+def start_softmax_head_at(head: nn.Linear, rate: float) -> None:
+    """Bias a two-logit head so softmax(.)[:, 1] starts at `rate`: logits 0 and logit(rate)."""
+    with torch.no_grad():
+        head.bias.copy_(torch.tensor([0.0, log_odds(rate)]))
 
 
 def _make_tower(tower_dims: tuple) -> nn.Sequential:
@@ -45,11 +56,13 @@ class ESMM(nn.Module):
         emb_dim: int = 20,
         tower_dims: tuple = _PAPER_TOWER_DIMS,
         aux_weight: float = 1.0,
+        output_bias_init: dict | None = None,
     ):
         super().__init__()
         self.emb_dim = emb_dim
         self.tower_dims = tuple(tower_dims)
         self.aux_weight = aux_weight
+        self.output_bias_init = validate_output_bias_init(output_bias_init, ("ctr", "cvr"))
         self.field_ids = sorted(field_vocab_sizes)
         self.embeddings = nn.ModuleDict()
         for field_id in self.field_ids:
@@ -63,6 +76,9 @@ class ESMM(nn.Module):
             self.embeddings[field_id] = bag
         self.ctr_tower = _make_tower(self.tower_dims)
         self.cvr_tower = _make_tower(self.tower_dims)
+        for head, tower in (("ctr", self.ctr_tower), ("cvr", self.cvr_tower)):
+            if self.output_bias_init and head in self.output_bias_init:
+                start_softmax_head_at(tower[-1], self.output_bias_init[head])
 
     def _pool(self, batch: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]) -> torch.Tensor:
         """Per-field pooled embeddings concatenated in field order: the shared tower input."""

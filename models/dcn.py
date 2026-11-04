@@ -22,6 +22,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from models.output_bias import log_odds, validate_output_bias_init
+
 
 def _normalize_weights(weights: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
     """Rescale each bag's weights to sum to 1 (0 if the bag's total weight is 0).
@@ -139,8 +141,10 @@ class DCNv2(nn.Module):
         head_init: str = "he",
         token_dropout: float = 0.0,
         structure: str = "parallel",
+        output_bias_init: dict | None = None,
     ):
         super().__init__()
+        self.output_bias_init = validate_output_bias_init(output_bias_init, ("ctr",))
         if structure not in ("parallel", "stacked"):
             raise ValueError(f"structure must be 'parallel' or 'stacked', got {structure!r}")
         self.structure = structure
@@ -177,6 +181,8 @@ class DCNv2(nn.Module):
         else:
             raise ValueError(f"head_init must be 'he' or 'xavier', got {head_init!r}")
         nn.init.zeros_(self.head.bias)
+        if self.output_bias_init:
+            nn.init.constant_(self.head.bias, log_odds(self.output_bias_init["ctr"]))
 
     def forward(self, batch: dict) -> torch.Tensor:
         """`batch`: field_id -> (ids, weights, offsets), as from `data.vocab.encode_batch`.

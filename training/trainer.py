@@ -350,6 +350,8 @@ class Trainer:
                     }
                     if self.model_name in ("esmm", "esmm_logged_pctr"):
                         ckpt_data["model_params"]["aux_weight"] = model.aux_weight
+                    if model.output_bias_init is not None:
+                        ckpt_data["model_params"]["output_bias_init"] = model.output_bias_init
                 if self.model_name == "esmm_logged_pctr":
                     ckpt_data["model_params"].update(
                         objective=model.objective, alpha=model.alpha,

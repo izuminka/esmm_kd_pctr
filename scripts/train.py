@@ -15,6 +15,7 @@ pointer files are described in training/runs.py.
 
 import argparse
 import logging
+import math
 import os
 import random
 import signal
@@ -48,6 +49,29 @@ logger = logging.getLogger("train")
 def load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+# Configs record output_bias_init to at least five significant figures.
+OUTPUT_BIAS_REL_TOL = 1e-4
+
+
+def training_base_rates(train) -> dict:
+    """P(click) and P(conversion | click) on the rows the model trains on."""
+    clicks, conversions = float(train.ys.double().sum()), float(train.zs.double().sum())
+    return {"ctr": clicks / len(train), "cvr": conversions / clicks}
+
+
+def check_output_bias_init(cfg: dict, rates: dict) -> None:
+    """Fail when a configured start is not the training base rate it stands for.
+
+    Checked after any cohort or nonclick downsampling, so a start left over from
+    a different retention rate stops the run instead of starting a head off-rate.
+    """
+    configured = cfg.get("model_params", {}).get("output_bias_init") or {}
+    for head, rate in configured.items():
+        if head in rates and not math.isclose(rate, rates[head], rel_tol=OUTPUT_BIAS_REL_TOL):
+            raise ValueError(f"model_params.output_bias_init.{head} is {rate}, but the training "
+                             f"rows give {rates[head]:.7g}")
 
 
 def build_model(cfg: dict, vocab_sizes: dict):
@@ -200,6 +224,9 @@ def main():
                         sampling["rate"], len(dataset.train), original_rows,
                         counts["n_clicks"], counts["n_conversions"])
 
+        rates = training_base_rates(dataset.train)
+        check_output_bias_init(cfg, rates)
+        runs.update_run(run_dir, training_base_rates=rates)
         model = build_model(cfg, dataset.vocab_sizes)
         metric_fn = build_metric_fn(cfg)
         trainer = Trainer(cfg, _ROOT_DIR)

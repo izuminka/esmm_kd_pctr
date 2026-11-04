@@ -165,8 +165,10 @@ def test_unchanged_canonical_esmm_loss_applies_with_no_custom_training_loss():
 
 def test_complete_checkpoint_restoration_preserves_shared_identity_and_eval(tmp_path):
     model = _model().eval()
+    # The click head's start is recorded once, with the CVR tower's, at ESMM level.
     assert set(model.model_params["dcn_params"]) == (
-        set(inspect.signature(DCNv2).parameters) - {"field_vocab_sizes"})
+        set(inspect.signature(DCNv2).parameters) - {"field_vocab_sizes", "output_bias_init"})
+    assert "output_bias_init" in model.model_params
     path = tmp_path / "esmm_dcn.pt"
     torch.save({"params": model.model_params, "state": model.state_dict()}, path)
     checkpoint = torch.load(path, weights_only=True)

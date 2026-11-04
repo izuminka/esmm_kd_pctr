@@ -9,18 +9,22 @@ training:
   grad_clip_norm: 0
   seed: 42
   shuffle_block_size: 1
+  stratify_batches: true  # each batch holds nonclicks, clicks and conversions in proportion
   checkpoint_metric: ctcvr_ne  # corrected CTR * unchanged CVR, full validation
   keep_checkpoint: best
   save_predictions: false
   gpus: 1
   load_test: false
-  out_dir: artifacts_downsampled
+  out_dir: artifacts_final_downsampled
   early_stopping:
     enabled: false
     patience: 2
     min_delta: 0.0
 
 model_params:
+  output_bias_init:        # start each head at its training base rate on the retained rows
+    ctr: 0.44697409        # training clicks / retained training rows
+    cvr: 0.0053562476      # training conversions / training clicks
   emb_dim: 20
   tower_dims: [460, 360, 200, 80, 2]
   aux_weight: 1.0
@@ -29,5 +33,5 @@ data:
   csv_dir: ali-ccp/extracted
   encoded_dir: ali-ccp/encoded
   nonclick_sampling:
-    rate: 0.5
+    rate: 0.05  # keep every click and 5% of training nonclicks
     seed: 2026  # independent of model initialization, fixed across epochs

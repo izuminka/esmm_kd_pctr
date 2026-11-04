@@ -9,17 +9,21 @@ training:
   grad_clip_norm: 0
   seed: 42
   shuffle_block_size: 1
+  stratify_batches: true  # each batch holds nonclicks, clicks and conversions in proportion
   checkpoint_metric: logged_ctcvr_ne
   save_predictions: false
   gpus: 1
   load_test: false
-  out_dir: artifacts_downsampled
+  out_dir: artifacts_final_downsampled
   keep_checkpoint: best
   early_stopping:
     enabled: false
     patience: 2
     min_delta: 0.0
 model_params:
+  output_bias_init:        # start each head at its training base rate on the retained rows
+    ctr: 0.44697409        # training clicks / retained training rows
+    cvr: 0.0053562476      # training conversions / training clicks
   emb_dim: 20
   tower_dims:
   - 460
@@ -33,10 +37,10 @@ model_params:
 # Original full-population pCTR. Apply tau only inside the auxiliary loss;
 # validation and logged test evaluation use the original p * v.
 logged_pctr:
-  dcn_run: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z
+  dcn_run: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z
   predictions:
-    train: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/train.parquet
-    val: artifacts/dcn_matched_stats_wd3e6/20260917T232959Z/predictions/val.parquet
+    train: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z/predictions/train.parquet
+    val: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z/predictions/val.parquet
   score_column: score
 evaluation:
   is_logged_ctcvr: true
@@ -44,5 +48,5 @@ data:
   csv_dir: ali-ccp/extracted
   encoded_dir: ali-ccp/encoded
   nonclick_sampling:
-    rate: 0.5
+    rate: 0.05  # keep every click and 5% of training nonclicks
     seed: 2026

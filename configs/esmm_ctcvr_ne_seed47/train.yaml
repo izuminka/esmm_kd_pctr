@@ -11,6 +11,7 @@ training:
   shuffle_block_size: 1  # 1 = permute rows; >1 keeps that many consecutive
                          # rows together, which on user-ordered data collapses
                          # a batch to a few hundred distinct users
+  stratify_batches: true  # each batch holds nonclicks, clicks and conversions in proportion
   checkpoint_metric: ctcvr_ne  # minimize native q*v NE on all validation impressions
   keep_checkpoint: best  # same validation selection rule for full, half and quarter
   save_predictions: false  # score train/val/test in memory; write metrics only
@@ -18,13 +19,16 @@ training:
   load_test: false    # test + its common table are ~17 GB; holding them beside
                       # train, val and the optimizer state exceeds one 40 GB card.
                       # scripts/predict_encoded.py exports test afterwards.
-  out_dir: artifacts  # relative to project root (parent of code/)
+  out_dir: artifacts_final  # relative to project root (parent of code/)
   early_stopping:
     enabled: false
     patience: 2       # stop after two epochs without validation improvement
     min_delta: 0.0
 
 model_params:
+  output_bias_init:        # start each head at its training base rate
+    ctr: 0.03887418        # training clicks / training rows
+    cvr: 0.0053562476      # training conversions / training clicks
   emb_dim: 20
   tower_dims: [460, 360, 200, 80, 2]
   aux_weight: 1.0  # weight on the CTR term; 1 is the canonical ESMM loss

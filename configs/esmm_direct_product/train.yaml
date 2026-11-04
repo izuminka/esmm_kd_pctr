@@ -13,11 +13,12 @@ training:
   grad_clip_norm: 0
   seed: 42
   shuffle_block_size: 1
+  stratify_batches: true  # each batch holds nonclicks, clicks and conversions in proportion
   checkpoint_metric: logged_ctcvr_ne  # minimize validation NE of p*v
   save_predictions: false
   gpus: 1
   load_test: false
-  out_dir: artifacts
+  out_dir: artifacts_final
   keep_checkpoint: best
   early_stopping:
     enabled: false      # complete all five epochs
@@ -25,17 +26,19 @@ training:
     min_delta: 0.0
 
 model_params:
+  output_bias_init:        # start each head at its training base rate
+    cvr: 0.0053562476      # training conversions / training clicks
   emb_dim: 20
   tower_dims: [460, 360, 200, 80, 2]
 
 # Frozen DCN-V2 pCTR p: detached, excluded from model inputs, and used only as
 # the multiplier in the Equation 7 loss and logged CTCVR evaluation.
 logged_pctr:
-  dcn_run: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z
+  dcn_run: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z
   predictions:
-    train: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/train.parquet
-    val: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/val.parquet
-    test: artifacts/dcn_matched_stats_wd3e6_seed42/20260917T232959Z/predictions/test.parquet
+    train: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z/predictions/train.parquet
+    val: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z/predictions/val.parquet
+    test: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z/predictions/test.parquet
   score_column: score
 
 evaluation:

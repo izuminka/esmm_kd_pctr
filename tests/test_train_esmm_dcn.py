@@ -61,7 +61,11 @@ def test_recipe_is_exactly_esmm_plus_dcn_architecture():
     baseline = load_config(CODE / "configs/esmm/train.yaml")
     reference = load_config(CODE / "configs/dcn_matched_stats_wd3e6/train.yaml")
     assert cfg["model"] == "esmm_dcn"
+    # The DCN tower's architecture is the standalone teacher's; its click-head
+    # start is set once, with the CVR tower's, at ESMM level and must agree.
+    teacher_start = reference["model_params"].pop("output_bias_init")
     assert cfg["model_params"].pop("dcn_params") == reference["model_params"]
+    assert cfg["model_params"]["output_bias_init"]["ctr"] == teacher_start["ctr"]
     cfg["model"] = "esmm"
     assert cfg == baseline
     assert "dcn_optimizer" not in cfg["training"]

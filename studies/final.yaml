@@ -1,0 +1,31 @@
+# The ten-seed study behind main.tex Tables 1 and 2. Every recipe is a train.yaml
+# under code/configs*; each seed's config is that file with only training.seed
+# changed. Paths are relative to the project root.
+#
+#   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/final.yaml submit teacher
+#   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/final.yaml submit students esmm down_esmm
+#   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/final.yaml report
+study_dir: artifacts_final/study
+seeds: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+
+# The frozen serving pCTR: the paper's DCN-V2 recipe and seed, retrained with the
+# output bias init and stratified batches. With several seeds or candidates, the
+# run with the lowest validation CTR NE becomes the teacher for all students.
+teacher:
+  pctr_model: final_teacher  # name of the logged-pCTR source in each student's metrics_logged/
+  seeds: [42]                # the paper teacher's seed
+  candidates:
+    - code/configs/dcn_matched_stats_wd3e6/train.yaml
+
+# Table order. Variants whose training reads teacher scores (Direct, KD, KD tau)
+# are submitted after the teacher is selected; their recipes name its run.
+variants:
+  - {id: esmm, label: ESMM, regime: full, recipe: code/configs/esmm/train.yaml}
+  - {id: esmm_dcn, label: "\\shortstack{ESMM\\\\+ DCN-V2}", regime: full, recipe: code/configs/esmm_dcn/train.yaml}
+  - {id: direct, label: Direct, regime: full, recipe: code/configs/esmm_direct_product/train.yaml}
+  - {id: kd03, label: KD--0.3, regime: full, recipe: code/configs/esmm_logged_pctr_kd03/train.yaml}
+  - {id: kd05, label: KD--0.5, regime: full, recipe: code/configs/esmm_logged_pctr_kd05/train.yaml}
+  - {id: kd07, label: KD--0.7, regime: full, recipe: code/configs/esmm_logged_pctr_kd07/train.yaml}
+  - {id: kd0, label: KD--0, regime: full, recipe: code/configs/esmm_logged_pctr_kd_teacher/train.yaml}
+  - {id: down_esmm, label: ESMM, regime: downsampled, recipe: code/configs_downsampled/esmm/train.yaml}
+  - {id: down_kd_tau, label: "KD$_{\\tau}$--0.5", regime: downsampled, recipe: code/configs_downsampled/esmm_logged_pctr_kd_tau/train.yaml}

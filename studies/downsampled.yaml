@@ -1,0 +1,20 @@
+# Ten-seed 5% nonclick-retention study (main.tex Table 2) with the restored
+# features plus base-rate output starts and label-stratified batches. Each
+# seed's config is the recipe with only training.seed changed.
+#
+#   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/downsampled.yaml submit teacher
+#   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/downsampled.yaml submit students down_esmm
+#   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/downsampled.yaml report
+study_dir: artifacts_final_downsampled/study
+seeds: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+
+# Serving pCTR p: the DCN-V2 retrained for the final tables (artifacts_final),
+# the same teacher as Table 1. KD tau distills it; ESMM trains without it and
+# only its serving p*v score reads it.
+teacher:
+  pctr_model: final_teacher
+  fixed_run: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z
+
+variants:
+  - {id: down_esmm, label: ESMM, regime: downsampled, recipe: code/configs_downsampled/esmm/train.yaml}
+  - {id: down_kd_tau, label: "KD$_{\\tau}$--0.5", regime: downsampled, recipe: code/configs_downsampled/esmm_logged_pctr_kd_tau/train.yaml}

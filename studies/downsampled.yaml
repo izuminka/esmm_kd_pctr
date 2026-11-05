@@ -3,7 +3,7 @@
 # seed's config is the recipe with only training.seed changed.
 #
 #   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/downsampled.yaml submit teacher
-#   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/downsampled.yaml submit students down_esmm
+#   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/downsampled.yaml submit students down_kd0.3_tau
 #   code/.venv/bin/python code/scripts/run_final_study.py --spec code/studies/downsampled.yaml report
 study_dir: artifacts_final_downsampled/study
 seeds: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
@@ -17,4 +17,5 @@ teacher:
 
 variants:
   - {id: down_esmm, label: ESMM, regime: downsampled, recipe: code/configs_downsampled/esmm/train.yaml}
-  - {id: down_kd_tau, label: "KD$_{\\tau}$--0.5", regime: downsampled, recipe: code/configs_downsampled/esmm_logged_pctr_kd_tau/train.yaml}
+  - {id: down_kd_tau, label: "KD$_{\\mathcal R}$--0.5", regime: downsampled, recipe: code/configs_downsampled/esmm_logged_pctr_kd_tau/train.yaml}
+  - {id: down_kd0.3_tau, label: "KD$_{\\mathcal R}$--0.3", regime: downsampled, recipe: code/configs_downsampled/esmm_logged_pctr_kd_tau03/train.yaml}

@@ -27,7 +27,7 @@ OUT = ROOT / "paper/main/figures"
 MODELS = [
     ("ESMM", "esmm", "#0072B2"),
     ("ESMM+DCN-V2", "esmm_dcn", "#E69F00"),
-    ("KD–0.5", "kd05", "#CC79A7"),
+    ("KD–0.3", "kd03", "#CC79A7"),
 ]
 POPS = [("p_q", "(a) p vs q"), ("pv_qv", "(b) pv vs qv")]
 METRICS = [

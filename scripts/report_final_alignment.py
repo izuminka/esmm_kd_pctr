@@ -6,7 +6,7 @@ Run from the project root:
         --alignment paper/main/results/ctr_alignment_final.json \
         --correlation paper/main/results/ctr_correlation_final.json
 
-For ESMM, ESMM + DCN-V2 and KD-0.5, every seed of the final study is scored
+For ESMM, ESMM + DCN-V2 and KD-0.3, every seed of the final study is scored
 against the study's frozen teacher p on all test impressions, with the
 definitions of report_ctr_alignment.py:
   KL(p||q)   = mean[-p ln q' - (1-p) ln(1-q') ] - mean[H(p)], q' = clip(q, 1e-7, 1-1e-7)
@@ -28,7 +28,7 @@ import pandas as pd
 CODE = Path(__file__).resolve().parents[1]
 ROOT = CODE.parent
 Q_EPSILON = 1e-7
-VARIANTS = ("esmm", "esmm_dcn", "kd05")
+VARIANTS = ("esmm", "esmm_dcn", "kd03")
 
 
 def sha(path) -> str:

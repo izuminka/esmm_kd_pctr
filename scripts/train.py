@@ -97,9 +97,6 @@ def build_model(cfg: dict, vocab_sizes: dict):
     if cfg["model"] == "esmm_direct_product":
         from models.esmm_direct_product import ESMMDirectProduct
         return ESMMDirectProduct(vocab_sizes, **params)
-    if cfg["model"] == "cnn_attention":
-        from models.cnn_attention import CNNAttention
-        return CNNAttention(vocab_sizes, **params)
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 
 
@@ -122,7 +119,7 @@ def build_metric_fn(cfg: dict):
         rate = sampling["rate"] if sampling else downsampling.DEFAULT_NONCLICK_RATE
         return lambda model, enc, y, z: evaluate_esmm(
             model, enc, y, z, is_logged_ctcvr=False, nonclick_rate=rate)[population][metric]
-    if cfg["model"] in (*LOGGED_PCTR_TRAINING_MODELS, "cnn_attention"):
+    if cfg["model"] in LOGGED_PCTR_TRAINING_MODELS:
         return None  # encoded data path only, where the trainer scores validation itself
     raise ValueError(f"Unknown model: {cfg['model']!r}")
 

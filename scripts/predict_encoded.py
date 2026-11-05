@@ -63,14 +63,6 @@ def build_model(model_type: str, vocab_sizes: dict, params: dict):
     if model_type == "esmm_direct_product":
         from models.esmm_direct_product import ESMMDirectProduct
         return ESMMDirectProduct(vocab_sizes, **params)
-    if model_type == "cnn_attention":
-        from models.cnn_attention import CNNAttention
-        # Checkpoints created before the robust architecture was versioned have
-        # the original tensor shapes and semantics. Restore them as version 1;
-        # new checkpoints persist architecture_version in model_params.
-        params = dict(params)
-        params.setdefault("architecture_version", 1)
-        return CNNAttention(vocab_sizes, **params)
     raise ValueError(f"Unknown model_type: {model_type!r}")
 
 
@@ -125,7 +117,7 @@ def main():
             run_cfg = yaml.safe_load(f)
     else:
         run_cfg = cfg
-    params = (ckpt["model_params"] if (ckpt["model_type"] in ("cnn_attention", "esmm_dcn")
+    params = (ckpt["model_params"] if (ckpt["model_type"] == "esmm_dcn"
               or ckpt.get("model_params", {}).get("objective") == "kd_tau")
               else run_cfg.get("model_params", {}))
     model = build_model(ckpt["model_type"], ckpt["vocab_sizes"], params).to(device)

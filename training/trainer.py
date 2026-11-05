@@ -166,28 +166,6 @@ class Trainer:
         )
         self.is_esmm = self.model_name in ESMM_MODELS
         self.uses_logged_pctr_for_training = self.model_name in LOGGED_PCTR_TRAINING_MODELS
-        self.is_cnn_attention = self.model_name == "cnn_attention"
-        self.cold_start_validation = tr.get("cold_start_validation")
-        if self.cold_start_validation is not None:
-            if not self.is_cnn_attention:
-                raise ValueError("cold_start_validation is supported only for cnn_attention")
-            self.cold_start_validation = {
-                "field": str(self.cold_start_validation["field"]),
-                "missing_rate": float(self.cold_start_validation["missing_rate"]),
-                "seed": int(self.cold_start_validation.get("seed", self.seed)),
-            }
-            if not 0 <= self.cold_start_validation["missing_rate"] <= 1:
-                raise ValueError("cold-start missing_rate must lie in [0, 1]")
-        cnn_metrics = (
-            "ctr_auc", "ctr_ne", "ctr_prauc",
-            "cold_ctr_auc", "cold_ctr_ne", "cold_ctr_prauc",
-        )
-        if self.is_cnn_attention and self.checkpoint_metric not in cnn_metrics:
-            raise ValueError(
-                "cnn_attention checkpoint_metric must be a CTR or cold-start CTR metric")
-        if self.checkpoint_metric.startswith("cold_") and self.cold_start_validation is None:
-            raise ValueError(
-                f"checkpoint_metric {self.checkpoint_metric!r} requires cold_start_validation")
         # Logged-score models validate on p*v; native ESMM only reports it on test.
         self.logged_ctcvr_splits = logged_ctcvr_splits(cfg)
         self.is_logged_ctcvr = bool(self.logged_ctcvr_splits)
@@ -237,8 +215,6 @@ class Trainer:
         use_numpy = isinstance(dataset, NumpyDataset)
         if self.nonclick_sampling is not None and not use_numpy:
             raise ValueError("nonclick sampling training requires the encoded dataset pipeline")
-        if self.is_cnn_attention and not use_numpy:
-            raise ValueError("cnn_attention requires the encoded NumpyDataset pipeline")
         if self.stratify_batches and not use_numpy:
             raise ValueError("stratify_batches requires the encoded dataset pipeline")
 
@@ -257,34 +233,15 @@ class Trainer:
 
         device = self.device
         model = model.to(device)
-        if (
-            self.cold_start_validation is not None
-            and self.cold_start_validation["field"] not in model.field_ids
-        ):
-            raise ValueError(
-                "cold_start_validation names unknown field "
-                f"{self.cold_start_validation['field']!r}")
         optimizer = self._make_optimizer(model)
         checkpoint_path = os.path.join(self.out_dir, "best.pt")
         history_path = os.path.join(self.out_dir, "history.csv")
-        history_extras = list(
+        history_extras = tuple(
             f"val_{population}_{metric}"
             for name, population in _HISTORY_POPULATIONS.items()
             if name != "CTCVR-logged" or "val" in self.logged_ctcvr_splits
-            if not self.is_cnn_attention or name in ("CTR", "CTCVR")
             for metric in _HISTORY_METRICS.values()
-        ) if self.is_esmm or self.is_cnn_attention else []
-        if self.is_cnn_attention:
-            history_extras.extend((
-                "val_attention_click_mean",
-                "val_attention_conversion_mean",
-                "val_attention_entropy",
-                "val_attention_min_task_weight",
-            ))
-            if self.cold_start_validation is not None:
-                history_extras.extend(
-                    f"val_cold_ctr_{metric}" for metric in _HISTORY_METRICS.values())
-        history_extras = tuple(history_extras)
+        ) if self.is_esmm else ()
         with open(history_path, "w", newline="") as f:
             csv.writer(f).writerow(["epoch", "loss", "val_score", "seconds", "saved", *history_extras])
 
@@ -363,8 +320,6 @@ class Trainer:
                     ckpt_data["model_params"].update(
                         objective=model.objective, alpha=model.alpha,
                         aux_weight=model.aux_weight, nonclick_rate=model.nonclick_rate)
-                if self.is_cnn_attention:
-                    ckpt_data["model_params"] = model.model_params
                 if self.logged_pctr_source is not None:
                     ckpt_data["logged_pctr"] = self.logged_pctr_source
                 if self.nonclick_sampling is not None:
@@ -578,10 +533,6 @@ class Trainer:
             from models.esmm import esmm_loss
             q, v = model(enc)
             loss = esmm_loss(y, z, q, v, model.aux_weight)
-        elif self.is_cnn_attention:
-            from models.cnn_attention import cnn_attention_loss
-            click_logits, conversion_logits = model(enc)
-            loss = cnn_attention_loss(y, z, click_logits, conversion_logits, model.alpha)
         else:
             from models.dcn import dcn_loss
             loss = dcn_loss(y, model(enc))
@@ -613,9 +564,6 @@ class Trainer:
             if split_name in self.logged_ctcvr_splits:
                 scores["p"] = split_data.logged_pctr[idx]
             return scores
-        if self.is_cnn_attention:
-            click_logits, conversion_logits = model(enc)
-            return {"q": torch.sigmoid(click_logits), "c": torch.sigmoid(conversion_logits)}
         return {"score": torch.sigmoid(model(enc))}
 
     def _selection_inputs(
@@ -635,10 +583,8 @@ class Trainer:
         if self.checkpoint_metric == "pcvr_ne":
             clicked = y == 1
             return column("v")[clicked], z[clicked]
-        if self.checkpoint_metric.startswith("cold_ctr_"):
-            return column("q_cold"), y
         if self.checkpoint_metric in ("ctr_auc", "ctr_ne", "ctr_prauc"):
-            return column("q" if self.is_esmm or self.is_cnn_attention else "score"), y
+            return column("q" if self.is_esmm else "score"), y
         if self.checkpoint_metric in ("ctcvr_prauc", "ctcvr_ne"):
             return column("q") * column("v"), y * z
         if self.checkpoint_metric in ("logged_ctcvr_prauc", "logged_ctcvr_ne"):
@@ -677,18 +623,12 @@ class Trainer:
         )
 
     def _val_score_numpy(self, model, val_split) -> tuple[float, dict]:
-        """Score ordinary and deterministic cold-start validation populations."""
-        from evaluation.metrics import auc, compute_metrics, normalized_entropy, pr_auc
+        """Score the complete validation population with the final-report evaluator."""
+        from evaluation.metrics import auc, normalized_entropy, pr_auc
         model.eval()
-        columns, ys, zs, attention_parts = {}, [], [], []
+        columns, ys, zs = {}, [], []
         eval_batch = self.eval_batch_size
         n = len(val_split)
-        cold_mask = None
-        if self.cold_start_validation is not None:
-            rng = np.random.default_rng(self.cold_start_validation["seed"])
-            cold_mask = torch.from_numpy(
-                rng.random(n) < self.cold_start_validation["missing_rate"])
-
         with torch.no_grad():
             for start in range(0, n, eval_batch):
                 stop = min(start + eval_batch, n)
@@ -697,25 +637,8 @@ class Trainer:
                 batch_scores = self._batch_scores(
                     model, val_split, idx, enc, "val",
                     is_ctr_downsampled_space=downsampling.is_ctr_downsampled_space["val"])
-                attention = getattr(model, "last_attention_weights", None)
-                if self.is_cnn_attention and attention is not None:
-                    attention_parts.append(attention.cpu())
                 for column, value in batch_scores.items():
                     columns.setdefault(column, []).append(value.cpu())
-
-                if cold_mask is not None:
-                    missing = cold_mask[start:stop].to(val_split.device)
-                    click_logits, _ = model(
-                        enc,
-                        forced_missing={
-                            self.cold_start_validation["field"]: missing,
-                        },
-                    )
-                    cold_q = torch.sigmoid(click_logits).cpu()
-                    # One deployment-like population: ordinary scores on covered
-                    # rows and forced-missing scores on the configured fraction.
-                    mixed_q = torch.where(missing.cpu(), cold_q, batch_scores["q"].cpu())
-                    columns.setdefault("q_cold", []).append(mixed_q)
                 ys.append(y.cpu())
                 zs.append(z.cpu())
 
@@ -730,7 +653,7 @@ class Trainer:
                 "click classes in validation")
 
         extras = {}
-        if self.is_esmm or self.is_cnn_attention:
+        if self.is_esmm:
             from scripts.report_metrics import metric_rows
             rows = metric_rows(
                 "val",
@@ -744,20 +667,6 @@ class Trainer:
                 for row in rows
                 for metric, suffix in _HISTORY_METRICS.items()
             }
-        if "q_cold" in scores:
-            cold_metrics = compute_metrics(scores["q_cold"].numpy(), y.numpy())
-            extras.update({
-                f"val_cold_ctr_{suffix}": cold_metrics[metric]
-                for metric, suffix in _HISTORY_METRICS.items()
-            })
-        if attention_parts:
-            weights = torch.cat(attention_parts).clamp_min(torch.finfo(torch.float32).tiny)
-            extras.update({
-                "val_attention_click_mean": weights[:, 0].mean().item(),
-                "val_attention_conversion_mean": weights[:, 1].mean().item(),
-                "val_attention_entropy": (-(weights * weights.log()).sum(dim=1).mean().item()),
-                "val_attention_min_task_weight": weights.min().item(),
-            })
 
         if self.checkpoint_metric == "pcvr_ne":
             return extras["val_pcvr_ne"], extras

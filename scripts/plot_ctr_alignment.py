@@ -30,6 +30,9 @@ MODELS = [
     ("KD–0.3", "kd03", "#CC79A7"),
 ]
 POPS = [("p_q", "(a) p vs q"), ("pv_qv", "(b) pv vs qv")]
+# The frozen teacher side is the reference distribution on both panels.
+KL_DIRECTIONS = {"bernoulli_kl": "KL(Bern(p)||Bern(q'))",
+                 "product_bernoulli_kl": "KL(Bern(pv)||Bern(q'v))"}
 METRICS = [
     ("kl", "KL ↓"),
     ("pearson", "Pearson ↑"),
@@ -52,8 +55,8 @@ def checked_stats(values, mean, sem, name):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--alignment", type=Path, default=ROOT/"paper/main/results/ctr_alignment.json")
-    parser.add_argument("--correlation", type=Path, default=ROOT/"paper/main/results/ctr_correlation.json")
+    parser.add_argument("--alignment", type=Path, default=ROOT/"paper/main/results/ctr_alignment_final.json")
+    parser.add_argument("--correlation", type=Path, default=ROOT/"paper/main/results/ctr_correlation_final.json")
     args = parser.parse_args()
     OUT.mkdir(exist_ok=True)
     records = []
@@ -62,6 +65,8 @@ def main():
     data = json.loads(alignment_path.read_text())
     correlation = json.loads(correlation_path.read_text())
     source_hashes = {str(path.relative_to(ROOT)): digest(path) for path in (alignment_path, correlation_path)}
+    if data.get("kl_directions") != KL_DIRECTIONS:
+        raise ValueError(f"Alignment report KL directions {data.get('kl_directions')} are not {KL_DIRECTIONS}")
     if correlation["inputs"]["alignment_sha256"] != digest(alignment_path):
         raise ValueError("Correlation is bound to a different alignment report")
     for key in ("teacher_sha256", "teacher_predictions", "summary_sha256"):
@@ -200,7 +205,7 @@ def main():
         "teacher_sha256": data["inputs"]["teacher_sha256"],
         "summary_sha256": data["inputs"]["summary_sha256"],
         "validation": "12 bar means and SEMs recomputed from ten matched seeds; teacher, source, run, cache and checkpoint identities match",
-        "kl_directions": {"p_q": "KL(Bern(p)||Bern(q))", "pv_qv": "KL(Bern(qv)||Bern(pv))"},
+        "kl_directions": {"p_q": KL_DIRECTIONS["bernoulli_kl"], "pv_qv": KL_DIRECTIONS["product_bernoulli_kl"]},
         "raw_bar_values": records,
         "truncated_axes": True,
         "axis_break_markers": False,

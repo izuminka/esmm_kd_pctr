@@ -2,16 +2,15 @@
 
 Run from the project root:
     code/.venv/bin/python code/scripts/report_final_alignment.py
-    code/.venv/bin/python code/scripts/plot_ctr_alignment.py \
-        --alignment paper/main/results/ctr_alignment_final.json \
-        --correlation paper/main/results/ctr_correlation_final.json
+    code/.venv/bin/python code/scripts/plot_ctr_alignment.py
 
 For ESMM, ESMM + DCN-V2 and KD-0.3, every seed of the final study is scored
-against the study's frozen teacher p on all test impressions, with the
-definitions of report_ctr_alignment.py:
-  KL(p||q)   = mean[-p ln q' - (1-p) ln(1-q') ] - mean[H(p)], q' = clip(q, 1e-7, 1-1e-7)
-  KL(qv||pv) = mean KL(Bern(q*v) || Bern(p*v)), unclipped, 0 ln 0 = 0
-  Pearson r(p, q) and r(q*v, p*v) on raw float64 scores.
+against the study's frozen teacher p on all test impressions. The teacher side
+is the reference distribution on both panels, with q' = clip(q, 1e-7, 1-1e-7)
+and 0 ln 0 = 0:
+  KL(p||q)   = mean KL(Bern(p) || Bern(q'))
+  KL(pv||qv) = mean KL(Bern(p*v) || Bern(q'*v))
+  Pearson r(p, q) and r(p*v, q*v) on raw float64 scores.
 Both reports are written in the format plot_ctr_alignment.py validates.
 """
 
@@ -29,6 +28,8 @@ CODE = Path(__file__).resolve().parents[1]
 ROOT = CODE.parent
 Q_EPSILON = 1e-7
 VARIANTS = ("esmm", "esmm_dcn", "kd03")
+KL_DIRECTIONS = {"bernoulli_kl": "KL(Bern(p)||Bern(q'))",
+                 "product_bernoulli_kl": "KL(Bern(pv)||Bern(q'v))"}
 
 
 def sha(path) -> str:
@@ -60,15 +61,17 @@ def score_run(args):
     p = teacher.score.to_numpy(np.float64)
     q = frame.q.to_numpy(np.float64)
     v = frame.v.to_numpy(np.float64)
-    qv, pv = q * v, p * v
+    q_clipped = np.clip(q, Q_EPSILON, 1 - Q_EPSILON)
+    pv, qv = p * v, q * v
     meta = json.loads((run / "predictions/test.provenance.json").read_text())
     history = pd.read_csv(run / "history.csv")
     return {
         "variant": variant, "seed": seed, "rows": len(frame),
-        "bernoulli_kl": bernoulli_kl(p, np.clip(q, Q_EPSILON, 1 - Q_EPSILON)),
-        "product_bernoulli_kl": bernoulli_kl(qv, pv),
+        "q_clipped_count": int(np.count_nonzero(q_clipped != q)),
+        "bernoulli_kl": bernoulli_kl(p, q_clipped),
+        "product_bernoulli_kl": bernoulli_kl(pv, q_clipped * v),
         "pearson": float(np.corrcoef(p, q)[0, 1]),
-        "product_pearson": float(np.corrcoef(qv, pv)[0, 1]),
+        "product_pearson": float(np.corrcoef(pv, qv)[0, 1]),
         "provenance": {
             "variant": variant, "seed": seed, "run_dir": str(run),
             "predictions_sha256": meta["sha256"],
@@ -111,8 +114,10 @@ def main():
     provenance = [r["provenance"] for r in rows]
     alignment = {
         "definition": __doc__,
+        "kl_directions": KL_DIRECTIONS,
         "inputs": inputs,
-        "per_seed": [{k: r[k] for k in ("variant", "seed", "rows", "bernoulli_kl", "product_bernoulli_kl")}
+        "per_seed": [{k: r[k] for k in ("variant", "seed", "rows", "q_clipped_count",
+                                        "bernoulli_kl", "product_bernoulli_kl")}
                      for r in rows],
         "summary": [{"variant": v, "metric": m, **stats([r[m] for r in rows if r["variant"] == v])}
                     for v in VARIANTS for m in ("bernoulli_kl", "product_bernoulli_kl")],

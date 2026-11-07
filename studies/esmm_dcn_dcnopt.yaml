@@ -1,0 +1,15 @@
+# Isolated ten-seed control: ESMM + DCN-V2 under the standalone DCN teacher's
+# whole-model optimizer recipe. Keeping this outside final.yaml prevents the
+# diagnostic arm from changing the manuscript's current summary and tables.
+study_dir: artifacts_final/esmm_dcn_dcnopt_study
+seeds: [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+
+teacher:
+  pctr_model: final_teacher
+  fixed_run: artifacts_final/dcn_matched_stats_wd3e6_seed42/20261104T214459Z
+
+variants:
+  - id: esmm_dcn_dcnopt
+    label: "ESMM + DCN-V2 (DCN optimizer)"
+    regime: full
+    recipe: code/configs/esmm_dcn_dcnopt/train.yaml

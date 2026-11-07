@@ -1,0 +1,51 @@
+# ESMM + DCN-V2 trained with the standalone DCN teacher's optimizer recipe.
+# This diagnostic changes only LR, weight decay, and gradient clipping relative
+# to configs/esmm_dcn/train.yaml; all data, architecture, and ESMM settings stay fixed.
+model: esmm_dcn
+training:
+  evaluate_test: false
+  epochs: 5
+  batch_size: 65536
+  eval_batch_size: 65536
+  lr: 0.0005
+  weight_decay: 0.000003
+  grad_clip_norm: 10
+  seed: 42
+  shuffle_block_size: 1
+  stratify_batches: true  # each batch holds nonclicks, clicks and conversions in proportion
+  checkpoint_metric: ctcvr_ne
+  keep_checkpoint: best
+  save_predictions: false
+  gpus: -1
+  load_test: false
+  out_dir: artifacts_final
+  early_stopping:
+    enabled: false
+    patience: 2
+    min_delta: 0.0
+model_params:
+  output_bias_init:        # start each head at its training base rate
+    ctr: 0.03887418        # training clicks / training rows
+    cvr: 0.0053562476      # training conversions / training clicks
+  emb_dim: 20
+  tower_dims:
+  - 460
+  - 360
+  - 200
+  - 80
+  - 2
+  aux_weight: 1.0
+  dcn_params:
+    emb_dim: 20
+    cross_rank: 128
+    num_cross_layers: 4
+    deep_hidden_dims:
+    - 512
+    - 256
+    - 128
+    dropout: 0.1
+    pooling: mean
+    bag_stats: true
+data:
+  csv_dir: ali-ccp/extracted
+  encoded_dir: ali-ccp/encoded

@@ -25,9 +25,9 @@ from matplotlib.ticker import FuncFormatter, MaxNLocator, ScalarFormatter
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "paper/main/figures"
 MODELS = [
-    ("ESMM", "esmm", "#0072B2"),
-    ("ESMM+DCN-V2", "esmm_dcn", "#E69F00"),
-    ("KD–0.3", "kd03", "#CC79A7"),
+    ("ESMM", "esmm", "#477AA3"),
+    ("ESMM+DCN-V2", "esmm_dcn", "#E0A34A"),
+    ("KD–0.3", "kd03", "#C97F91"),
 ]
 POPS = [("p_q", "(a) p vs q"), ("pv_qv", "(b) pv vs qv")]
 # The frozen teacher side is the reference distribution on both panels.
